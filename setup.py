@@ -84,6 +84,14 @@ setup(
     package_dir = {'xlte': ''},
     packages    = ['xlte'] + ['xlte.%s' % _ for _ in
                         find_packages()],
+    install_requires = [
+                   'websocket-client',
+                   'pygolang',
+                  ],
+
+    extras_require = {
+                   'test': ['pytest'],
+    },
 
     cmdclass    = {'build_py':      build_py,
                   },

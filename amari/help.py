@@ -23,3 +23,21 @@ from collections import OrderedDict
 
 # topic_name -> (topic_summary, topic_help)
 topic_dict = OrderedDict()
+
+help_websock = """\
+Every Amarisoft service supports so-called Remote API available via WebSocket
+protocol. The address, where such Remote API is served, is specified via
+com_addr in service configuration.
+
+Xamari commands, that need to interoperate with a service, take WebSocket
+URI of the service as their argument. Such URI has the following form:
+
+    ws://<host>:<port>
+
+for example
+
+    ws://[2a11:9ac0:d::1]:9002
+"""
+
+
+topic_dict['websock']   = "specifying WebSocket URI of a service",      help_websock
