@@ -88,6 +88,11 @@ setup(
     cmdclass    = {'build_py':      build_py,
                   },
 
+    entry_points= {'console_scripts': [
+                        'xamari     = xlte.amari.xamari:main',
+                      ]
+                  },
+
     classifiers = [_.strip() for _ in """\
         Development Status :: 2 - Pre-Alpha
         Intended Audience :: Developers
