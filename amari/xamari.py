@@ -38,7 +38,7 @@ def register_command(cmdname):
     command_module = importlib.import_module('xlte.amari.' + cmdname)
     command_dict[cmdname] = command_module
 
-for _ in ():
+for _ in ('xlog',):
     register_command(_)
 
 

@@ -39,5 +39,18 @@ for example
     ws://[2a11:9ac0:d::1]:9002
 """
 
+help_jsonlog = """\
+Some commands produce logs with JSON entries. Such logs are organized with JSON
+Lines format(*) with each entry occupying one line.
+
+Logs in JSON Lines format are handy to exchange in between programs, and with
+corresponding tools, e.g. jq(+), they can be also displayed in human-readable
+form and inspected quickly.
+
+(*) https://jsonlines.org/
+(+) https://stedolan.github.io/jq/
+"""
+
 
 topic_dict['websock']   = "specifying WebSocket URI of a service",      help_websock
+topic_dict['jsonlog']   = "log with JSON entries",                      help_jsonlog
