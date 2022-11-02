@@ -171,9 +171,7 @@ class _XLogger:
 
         # loop emitting requested logspecs
         t0 = time.now()
-        tnextv = []     # [i] - next time to arm for logspecv[i] relative to t0
-        for l in xl.logspecv:
-            tnextv.append(l.period)
+        tnextv = [0]*len(xl.logspecv)   # [i] - next time to arm for logspecv[i] relative to t0
 
         while 1:
             # go through all logspecs in the order they were given
