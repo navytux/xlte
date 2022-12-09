@@ -24,9 +24,8 @@
 
 import websocket
 import json
-from golang import chan, panic
-from golang import context, sync
-
+from golang import chan, select, nilchan, func, defer, panic
+from golang import context, sync, time
 
 
 # ConnError represents an error happened during Conn IO operation.
@@ -132,7 +131,15 @@ class Conn:
 
     def __serve_recv(conn, ctx):
         while 1:
-            rx_raw = conn._ws.recv()
+            try:
+                rx_raw = conn._ws.recv()
+            except websocket.WebSocketTimeoutException:
+                # ignore global rx timeout. Because Conn is multiplexed .req()
+                # handles "wait for response" timeout individually for each
+                # request. We still want to enable global ._ws timeout so that
+                # ._sendmsg is not blocked forever.
+                continue
+
             if len(rx_raw) == 0:
                 raise ConnError("connection closed by peer")
             rx = json.loads(rx_raw)
@@ -164,9 +171,27 @@ class Conn:
         rx, _ = conn.req_(msg, args_dict)
         return rx
 
+    @func
     def req_(conn, msg, args_dict):  # -> response, raw_response
         rxq = conn._send_msg(msg, args_dict)
-        _, ok = rxq.recv_()
+
+        # handle rx timeout ourselves. We cannot rely on global rx timeout
+        # since e.g. other replies might be coming in again and again.
+        δt = conn._ws.gettimeout()
+        rxt = nilchan
+        if δt is not None:
+            _ = time.Timer(δt)
+            defer(_.stop)
+            rxt = _.c
+
+        _, _rx = select(
+            rxt.recv,       # 0
+            rxq.recv_,      # 1
+        )
+        if _ == 0:
+            raise websocket.WebSocketTimeoutException("timed out waiting for response")
+
+        _, ok = _rx
         if not ok:
             # NOTE no need to lock - rxq is closed after ._down_err is set
             raise ConnError("recv") from conn._down_err
