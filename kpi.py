@@ -17,7 +17,11 @@
 #
 # See COPYING file for full licensing terms.
 # See https://www.nexedi.com/licensing for rationale and options.
-"""Package kpi will provide functionality to compute Key Performance Indicators of LTE services.
+"""Package kpi provides functionality to compute Key Performance Indicators of LTE services.
+
+- Calc is KPI calculator. It can be instantiated on MeasurementLog and time
+  interval over which to perform computations. Use Calc methods such as
+  .erab_accessibility() to compute KPIs.
 
 - MeasurementLog maintains journal with result of measurements. Use .append()
   to populate it with data.
@@ -25,16 +29,50 @@
 - Measurement represents measurement results. Its documentation establishes
   semantic for measurement results to be followed by drivers.
 
+To actually compute a KPI for particular LTE service, a measurements driver
+should exist for that LTE service(*). KPI computation pipeline is then as follows:
+
+     ─────────────
+    │ Measurement │  Measurements   ────────────────       ──────
+    │             │ ─────────────→ │ MeasurementLog │ ──→ │ Calc │ ──→  KPI
+    │   driver    │                 ────────────────       ──────
+     ─────────────
+
 
 See following 3GPP standards for KPI-related topics:
 
     - TS 32.401
     - TS 32.450
     - TS 32.425
+
+(*) for example package amari.kpi provides such measurements driver for Amarisoft LTE stack.
 """
 
 import numpy as np
 from golang import func
+
+
+# Calc provides way to compute KPIs over given measurement data and time interval.
+#
+# It is constructed from MeasurementLog and [τ_lo, τ_hi) and further provides
+# following methods for computing 3GPP KPIs:
+#
+#   .erab_accessibility()    -  TS 32.450 6.1.1 "E-RAB Accessibility"
+#   TODO other KPIs
+#
+# Upon construction specified time interval is potentially widened to cover
+# corresponding data in full granularity periods:
+#
+#                  τ'lo                  τ'hi
+#       ──────|─────|────[────|────)──────|──────|────────>
+#                    ←─ τ_lo      τ_hi ──→          time
+#
+#
+# See also: MeasurementLog, Measurement.
+class Calc:
+    # ._data            []Measurement - fully inside [.τ_lo, .τ_hi)
+    # [.τ_lo, .τ_hi)    time interval to compute over. Potentially wider than originally requested.
+    pass
 
 
 # MeasurementLog represent journal of performed Measurements.
@@ -159,6 +197,18 @@ class Measurement(np.void):
         #('HO.PrepSucc.QCI',                Tcc),       # 1
 
         ('PEE.Energy',                      np.float64),# J         4.12.2                  NOTE not kWh
+    ])
+
+
+# Interval is NumPy structured scalar that represents [lo,hi) interval.
+#
+# It is used by Calc to represent confidence interval for computed KPIs.
+# NOTE Interval is likely to be transient solution and in the future its usage
+#      will be probably changed to something like uncertainties.ufloat .
+class Interval(np.void):
+    _dtype = np.dtype([
+        ('lo',  np.float64),
+        ('hi',  np.float64),
     ])
 
 
@@ -326,6 +376,250 @@ def forget_past(mlog, Tcut):
     mlog._data = np.delete(mlog._data, slice(i))  # NOTE delete - contrary to append - preserves dtype
 
 # ----------------------------------------
+
+
+# Calc() is initialized from slice of data in the measurement log that is
+# covered/overlapped with [τ_lo, τ_hi) time interval.
+#
+# The time interval, that will actually be used for computations, is potentially wider.
+# See Calc class documentation for details.
+@func(Calc)
+def __init__(calc, mlog: MeasurementLog, τ_lo, τ_hi):
+    assert τ_lo <= τ_hi
+    data = mlog.data()
+    l = len(data)
+
+    # find min i: τ_lo < [i].(Tstart+δT)    ; i=l if not found
+    # TODO binary search
+    i = 0
+    while i < l:
+        m = data[i]
+        m_τhi = m['X.Tstart'] + m['X.δT']
+        if τ_lo < m_τhi:
+            break
+        i += 1
+
+    # find min j: τ_hi ≤ [j].Tstart         ; j=l if not found
+    j = i
+    while j < l:
+        m = data[j]
+        m_τlo = m['X.Tstart']
+        if τ_hi <= m_τlo:
+            break
+        j += 1
+
+    data = data[i:j]
+    if len(data) > 0:
+        m_lo = data[0]
+        m_hi = data[-1]
+        τ_lo = min(τ_lo, m_lo['X.Tstart'])
+        τ_hi = max(τ_hi, m_hi['X.Tstart']+m_hi['X.δT'])
+
+    calc._data = data
+    calc.τ_lo  = τ_lo
+    calc.τ_hi  = τ_hi
+
+
+# erab_accessibility computes "E-RAB Accessibility" KPI.
+#
+# It returns the following items:
+#
+#   - InitialEPSBEstabSR        probability of successful initial    E-RAB establishment    (%)
+#   - AddedEPSBEstabSR          probability of successful additional E-RAB establishment    (%)
+#
+# The items are returned as Intervals with information about confidence for
+# computed values.
+#
+# 3GPP reference: TS 32.450 6.1.1 "E-RAB Accessibility".
+@func(Calc)
+def erab_accessibility(calc): # -> InitialEPSBEstabSR, AddedEPSBEstabSR
+    SR = calc._success_rate
+
+    x = SR("Σcause RRC.ConnEstabSucc.CAUSE",
+           "Σcause RRC.ConnEstabAtt.CAUSE")
+
+    y = SR("S1SIG.ConnEstabSucc",
+           "S1SIG.ConnEstabAtt")
+
+    z = SR("Σqci ERAB.EstabInitSuccNbr.QCI",
+           "Σqci ERAB.EstabInitAttNbr.QCI")
+
+    InititialEPSBEstabSR = Interval(x['lo'] * y['lo'] * z['lo'],    # x·y·z
+                                    x['hi'] * y['hi'] * z['hi'])
+
+    AddedEPSBEstabSR = SR("Σqci ERAB.EstabAddSuccNbr.QCI",
+                          "Σqci ERAB.EstabAddAttNbr.QCI")
+
+    return _i2pc(InititialEPSBEstabSR), \
+           _i2pc(AddedEPSBEstabSR)          # as %
+
+
+# _success_rate computes success rate for fini/init events.
+#
+# i.e. ratio N(fini)/N(init).
+#
+# 3GPP defines success rate as N(successful-events) / N(total_events) ratio,
+# for example N(connection_established) / N(connection_attempt). We take this
+# definition as is for granularity periods with data, and extend it to also
+# account for time intervals covered by Calc where measurements results are not
+# available.
+#
+# To do so we extrapolate N(init) to be also contributed by "no data" periods
+# proportionally to "no data" time coverage, and then we note that in those
+# times, since no measurements have been made, the number of success events is
+# unknown and can lie anywhere in between 0 and the number of added init events.
+#
+# This gives the following for resulting success rate confidence interval:
+#
+# time covered by periods with data:                    Σt
+# time covered by periods with no data:                 t⁺      t⁺
+# extrapolation for incoming initiation events:         init⁺ = ──·Σ(init)
+#                                                               Σt
+# fini events for "no data" time is full uncertainty:   fini⁺ ∈ [0,init⁺]
+#
+# => success rate over whole time is uncertain in between
+#
+#           Σ(fini)              Σ(fini) + init⁺
+#       ──────────────   ≤ SR ≤  ──────────────
+#       Σ(init) + init⁺          Σ(init) + init⁺
+#
+# that confidence interval is returned as the result.
+#
+# fini/init events can be prefixed with "Σqci " or "Σcause ". If such prefix is
+# present, then fini/init value is obtained via call to Σqci or Σcause correspondingly.
+@func(Calc)
+def _success_rate(calc, fini, init): # -> Interval in [0,1]
+    def vget(m, name):
+        if name.startswith("Σqci "):
+            return Σqci  (m, name[len("Σqci "):])
+        if name.startswith("Σcause "):
+            return Σcause(m, name[len("Σcause "):])
+        return m[name]
+
+    t_     = 0.
+    Σt     = 0.
+    Σinit  = 0
+    Σfini  = 0
+    Σufini = 0  # Σinit where fini=ø but init is not ø
+    for m in calc._miter():
+        τ = m['X.δT']
+        vinit = vget(m, init)
+        vfini = vget(m, fini)
+        if isNA(vinit):
+            t_ += τ
+            # ignore fini, even if it is not ø.
+            # TODO more correct approach: init⁺ for this period ∈ [fini,∞] and
+            # once we extrapolate init⁺ we should check if it lies in that
+            # interval and adjust if not. Then fini could be used as is.
+        else:
+            Σt += τ
+            Σinit += vinit
+            if isNA(vfini):
+                Σufini += vinit
+            else:
+                Σfini += vfini
+
+    if Σinit == 0 or Σt == 0:
+        return Interval(0,1)    # full uncertainty
+
+    init_ = t_ * Σinit / Σt
+    a =  Σfini                   / (Σinit + init_)
+    b = (Σfini + init_ + Σufini) / (Σinit + init_)
+    return Interval(a,b)
+
+
+# _miter iterates through [.τ_lo, .τ_hi) yielding Measurements.
+#
+# The measurements are yielded with consecutive timestamps. There is no gaps
+# as NA Measurements are yielded for time holes in original MeasurementLog data.
+@func(Calc)
+def _miter(calc): # -> iter(Measurement)
+    τ = calc.τ_lo
+    l = len(calc._data)
+    i = 0  # current Measurement from data
+
+    while i < l:
+        m = calc._data[i]
+        m_τlo = m['X.Tstart']
+        m_τhi = m_τlo + m['X.δT']
+        assert m_τlo < m_τhi
+
+        if τ < m_τlo:
+            # <- M(ø)[τ, m_τlo)
+            h = Measurement()
+            h['X.Tstart'] = τ
+            h['X.δT']     = m_τlo - τ
+            yield h
+
+        # <- M from mlog
+        yield m
+
+        τ = m_τhi
+        i += 1
+
+    assert τ <= calc.τ_hi
+    if τ < calc.τ_hi:
+        # <- trailing M(ø)[τ, τ_hi)
+        h = Measurement()
+        h['X.Tstart'] = τ
+        h['X.δT']     = calc.τ_hi - τ
+        yield h
+
+
+# Interval(lo,hi) creates new interval with specified boundaries.
+@func(Interval)
+def __new__(cls, lo, hi):
+    i = _newscalar(cls, cls._dtype)
+    i['lo'] = lo
+    i['hi'] = hi
+    return i
+
+
+# Σqci performs summation over all qci for m[name_qci].
+#
+# usage example:
+#
+#   Σqci(m, 'ERAB.EstabInitSuccNbr.QCI')
+#
+# name_qci must have '.QCI' suffix.
+def Σqci(m: Measurement, name_qci: str):
+    return _Σx(m, name_qci, _all_qci)
+
+# Σcause, performs summation over all causes for m[name_cause].
+#
+# usage example:
+#
+#   Σcause(m, 'RRC.ConnEstabSucc.CAUSE')
+#
+# name_cause must have '.CAUSE' suffix.
+def Σcause(m: Measurement, name_cause: str):
+    return _Σx(m, name_cause, _all_cause)
+
+# _Σx serves Σqci and Σcause.
+def _Σx(m: Measurement, name_x: str, _all_x: func):
+    name_sum, name_xv = _all_x(name_x)
+    s = m[name_sum]
+    if not isNA(s):
+        return s
+    s  = s.dtype.type(0)
+    ok = True
+    for _ in name_xv:
+        v = m[_]
+        # we don't know the answer even if single value is NA
+        # (if data source does not support particular qci/cause, it should set it to 0)
+        if isNA(v):
+            ok = False
+        else:
+            s += v
+    if not ok:
+        return NA(s.dtype)
+    else:
+        return s
+
+
+# _i2pc maps Interval in [0,1] to one in [0,100] by multiplying lo/hi by 1e2.
+def _i2pc(x: Interval): # -> Interval
+    return Interval(x['lo']*100, x['hi']*100)
 
 
 # _newscalar creates new NumPy scalar instance with specified type and dtype.
