@@ -87,6 +87,7 @@ setup(
     install_requires = [
                    'websocket-client',
                    'pygolang',
+                   'numpy',
                   ],
 
     extras_require = {
