@@ -34,7 +34,6 @@ from xlte import amari
 
 import json
 import traceback
-from email.utils import formatdate
 from golang import func, defer
 from golang import time
 from golang.gcompat import qq
@@ -130,7 +129,7 @@ class _XLogger:
 
     # jemit emits line corresponding to event to the log.
     def jemit(xl, event, args_dict):
-        d = {"event": event, "time": formatdate(time.now())}  # RFC 822 / UTC
+        d = {"event": event, "time": time.now()}  # seconds since epoch
         d.update(args_dict)
         d = {"meta": d}
         xl.emit(json.dumps(d))
