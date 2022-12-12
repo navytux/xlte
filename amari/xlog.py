@@ -26,6 +26,27 @@
 (*) for example result of stats, ue_get and erab_get queries.
 """
 
+# XLog protocol
+#
+# XLog contains entries of 2 kinds:
+#
+#   1. events related to xlog operation, and
+#   2. results of the queries.
+#
+# Events come as                    {"meta": {"event": "<EVENT-NAME>", ...}.
+# Results of the queries come as    {"message": "<QUERY-NAME>", ...}
+#
+# Queries are specific to monitored LTE service.
+# Events  are specific to xlog itself and can be as follows:
+#
+#   - "start"                       when xlog starts
+#   - "service attach"              when xlog successfully connects to monitored LTE service
+#   - "service detach"              when xlog disconnects from monitored LTE service
+#   - "service connect failure"     when xlog tries to connect to monitored LTE service
+#                                   with unsuccessful result.
+#   - "xlog failure"                on internal xlog error
+
+
 # TODO log file + rotate
 # TODO log loading -> DataFrame
 
