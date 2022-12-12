@@ -4,6 +4,7 @@ build/
 .tox/
 .cache/
 .pytest_cache/
+.ipynb_checkpoints/
 
 *.o
 *.so
