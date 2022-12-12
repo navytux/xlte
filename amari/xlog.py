@@ -48,6 +48,14 @@
 
 
 # TODO log file + rotate
+#
+# Rejected alternative: automatic rotation by an external tool, e.g. log_proxy:
+#      see https://github.com/metwork-framework/log_proxy
+#      and https://superuser.com/questions/291368/log-rotation-of-stdout
+#
+#      reason for rejection: on every rotation we want to emit "end of file"
+#                            entries to old file + header to new file.
+
 # TODO log loading -> DataFrame
 
 
