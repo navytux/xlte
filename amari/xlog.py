@@ -126,7 +126,7 @@ class _XLogger:
     # emit saves line to the log.
     def emit(xl, line):
         assert '\n' not in line, line
-        print(line)
+        print(line, flush=True)
 
     # jemit emits line corresponding to event to the log.
     def jemit(xl, event, args_dict):
