@@ -214,6 +214,7 @@ class Conn:
             assert msgid not in conn._rxtab
             conn._rxtab[msgid] = (msg, rxq)
         d = {'message': msg, 'message_id': msgid}
+        d.update(args_dict)
         jmsg = json.dumps(d)
         try:
             conn._ws.send(jmsg)
