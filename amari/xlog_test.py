@@ -78,3 +78,12 @@ zzzqqqrrrr
     # EOF
     _ = xr.read()
     assert _ is None
+
+
+def test_LogSpec():
+    logspec = "stats[samples,rf]/60s"
+    spec = xlog.LogSpec.parse(logspec)
+
+    assert spec.query == "stats"
+    assert spec.optv == ["samples", "rf"]
+    assert spec.period == 60.0

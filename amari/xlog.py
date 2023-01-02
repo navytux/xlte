@@ -108,7 +108,7 @@ class LogSpec:
             _ = tail.find(']')
             if _ == -1:
                 bad("missing closing ]")
-            optv = tail[1:_-1].split(',')
+            optv = tail[1:_].split(',')
             tail = tail[_+1:]
 
         for c in '[]/ ':
