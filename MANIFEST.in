@@ -1,1 +1,5 @@
 include COPYING README.rst CHANGELOG.rst
+include *.py
+recursive-include amari	*.py
+recursive-include demo	*.py *.ipynb
+recursive-exclude */.ipynb_checkpoints *
