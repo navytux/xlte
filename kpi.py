@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -634,14 +634,18 @@ def _newscalar(typ, dtype):
 
 # NA returns "Not Available" value for dtype.
 def NA(dtype):
+    typ = dtype.type
     # float
-    if issubclass(dtype.type, np.floating):
-        return np.nan
+    if issubclass(typ, np.floating):
+        na = np.nan
     # int: NA is min value
-    if issubclass(dtype.type, np.signedinteger):
-        return np.iinfo(dtype.type).min
+    elif issubclass(typ, np.signedinteger):
+        na = np.iinfo(typ).min
 
-    raise AssertionError("NA not defined for dtype %s" % (dtype,))
+    else:
+        raise AssertionError("NA not defined for dtype %s" % (dtype,))
+
+    return typ(na)  # return the same type as dtype has, e.g. np.int32, not int
 
 
 # isNA returns whether value represent NA.

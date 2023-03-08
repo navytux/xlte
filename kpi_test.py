@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -422,7 +422,10 @@ def test_Calc_erab_accessibility():
 
 def test_NA():
     def _(typ):
-        return NA(typ(0).dtype)
+        na = NA(typ(0).dtype)
+        assert type(na) is typ
+        assert isNA(na)
+        return na
 
     assert np.isnan( _(np.float16) )
     assert np.isnan( _(np.float32) )
