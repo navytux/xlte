@@ -18,7 +18,8 @@
 # See COPYING file for full licensing terms.
 # See https://www.nexedi.com/licensing for rationale and options.
 
-from xlte.amari.drb import _Sampler, Sample, _BitSync, tti
+from xlte.amari.drb import _Sampler, Sample, _BitSync, tti, _IncStats
+import numpy as np
 from golang import func
 
 
@@ -565,3 +566,15 @@ def __eq__(a, b):
     # compare tx_time with tolerance to level-out floating point errors
     return (abs(a.tx_time - b.tx_time) < (tti / 1e6))  and \
            (a.tx_bytes == b.tx_bytes)
+
+
+def test_incstats():
+    X = list(3+_ for _ in range(20))
+    Xs = _IncStats()
+    for (n,x) in enumerate(X):
+        Xs.add(x)
+        Xn = X[:n+1]
+        assert Xs.avg() == np.mean(Xn)
+        assert Xs.std() == np.std(Xn)
+        assert Xs.min == min(Xn)
+        assert Xs.max == max(Xn)

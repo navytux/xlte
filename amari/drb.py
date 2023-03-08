@@ -27,6 +27,7 @@
 from golang import func
 from golang import time
 
+import math
 import sys
 
 tti = 1*time.millisecond  # = 1·subframe    Ts       =    1/(2048·15000)·s  ≈ 32.6 ns
@@ -618,6 +619,70 @@ def __repr__(s):
     b_hi = div(s.tx_bytes*8, t_lo)
     return "Sample(%db, %.1f ±%.1ftti)\t# %.0f ±%.0f bit/s" % \
             (s.tx_bytes, s.tx_time/tti, s.tx_time_err/tti, div(s.tx_bytes*8, s.tx_time), (b_hi - b_lo)/2)
+
+
+# ----------------------------------------
+
+# _IncStats incrementally computes statistics on provided values.
+#
+# Provide values via .add().
+# Retrieve statistical properties via .avg/.std/.var/.min/.max .
+class _IncStats:
+    __slots__ = (
+        'n',    # number of samples seen so far
+        'μ',    # current mean
+        'σ2',   # ~ current variance
+        'min',  # current min / max
+        'max',
+    )
+
+    def __init__(s):
+        s.n = 0
+        s.μ = 0.
+        s.σ2 = 0.
+        s.min = +float('inf')
+        s.max = -float('inf')
+
+    def add(s, x):
+        # https://www.johndcook.com/blog/standard_deviation/
+        s.n  += 1
+        μ_ = s.μ   # μ_{n-1}
+        s.μ  += (x - μ_)/s.n
+        s.σ2 += (x - μ_)*(x - s.μ)
+
+        s.min = min(s.min, x)
+        s.max = max(s.max, x)
+
+    def avg(s):
+        if s.n == 0:
+            return float('nan')
+        return s.μ
+
+    def var(s):
+        if s.n == 0:
+            return float('nan')
+        return s.σ2 / s.n   # note johndcook uses / (s.n-1) to unbias
+
+    def std(s):
+        return math.sqrt(s.var())
+
+
+    def __str__(s):
+        return s.str('%s', 1)
+
+    def str(s, fmt, scale):
+        t = "min/avg/max/σ  "
+        if s.n == 0:
+            t += "?/?/? ±?"
+        else:
+            μ   = s.avg() / scale
+            σ   = s.std() / scale
+            min = s.min   / scale
+            max = s.max   / scale
+
+            f = "%s/%s/%s ±%s" % ((fmt,)*4)
+            t += f % (min, μ, max, σ)
+        return t
 
 
 # ----------------------------------------
