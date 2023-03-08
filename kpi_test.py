@@ -18,7 +18,7 @@
 # See COPYING file for full licensing terms.
 # See https://www.nexedi.com/licensing for rationale and options.
 
-from xlte.kpi import Calc, MeasurementLog, Measurement, Interval, NA, isNA
+from xlte.kpi import Calc, MeasurementLog, Measurement, Interval, NA, isNA, Σqci, Σcause
 import numpy as np
 from pytest import raises
 
@@ -418,6 +418,34 @@ def test_Calc_erab_accessibility():
     InititialEPSBEstabSR, AddedEPSBEstabSR = calc.erab_accessibility()
     _(AddedEPSBEstabSR,     50)
     _(InititialEPSBEstabSR, 100 * 2*3*4 / (7*8*9))
+
+
+# verify Σqci.
+def test_Σqci():
+    m = Measurement()
+    x = 'ERAB.EstabInitAttNbr'
+    def Σ():
+        return Σqci(m, x+'.QCI')
+
+    assert isNA(Σ())
+    m[x+'.sum'] = 123
+    assert Σ() == 123
+
+    # TODO sum over individual causes (when implemented)
+
+
+# verify Σcause.
+def test_Σcause():
+    m = Measurement()
+    x = 'RRC.ConnEstabAtt'
+    def Σ():
+        return Σcause(m, x+'.CAUSE')
+
+    assert isNA(Σ())
+    m[x+'.sum'] = 123
+    assert Σ() == 123
+
+    # TODO sum over individual causes (when implemented)
 
 
 def test_NA():

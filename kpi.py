@@ -602,7 +602,7 @@ def _Σx(m: Measurement, name_x: str, _all_x: func):
     if not isNA(s):
         return s
     s  = s.dtype.type(0)
-    ok = True
+    ok = True  if len(name_xv) > 0  else False
     for _ in name_xv:
         v = m[_]
         # we don't know the answer even if single value is NA
