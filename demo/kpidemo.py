@@ -11,6 +11,7 @@ from golang import func, defer
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from matplotlib import ticker
 from datetime import datetime, timedelta
 
 import sys
@@ -58,10 +59,9 @@ def main():
     mlog = load_measurements(alogm)
 
 
-    # Step 3. Compute E-RAB Accessibility KPI over MeasurementLog with
-    # specified granularity period. We partition entries in the measurement log
-    # by specified time period, and further use kpi.Calc to compute the KPI
-    # over each period.
+    # Step 3. Compute KPIs over MeasurementLog with specified granularity
+    # period. We partition entries in the measurement log by specified time
+    # period, and further use kpi.Calc to compute the KPIs over each period.
 
     # calc_each_period partitions mlog data into periods and yields kpi.Calc for each period.
     def calc_each_period(mlog: kpi.MeasurementLog, tperiod: float): # -> yield kpi.Calc
@@ -77,6 +77,7 @@ def main():
     vτ = []
     vInititialEPSBEstabSR = []
     vAddedEPSBEstabSR     = []
+    vIPThp_qci            = []
 
     for calc in calc_each_period(mlog, tperiod):
         vτ.append(calc.τ_lo)
@@ -85,13 +86,18 @@ def main():
         vInititialEPSBEstabSR.append(_[0])
         vAddedEPSBEstabSR    .append(_[1])
 
+        _ = calc.eutran_ip_throughput()     # E-UTRAN IP Throughput
+        vIPThp_qci.append(_)
+
     vτ                      = np.asarray([datetime.fromtimestamp(_) for _ in vτ])
     vInititialEPSBEstabSR   = np.asarray(vInititialEPSBEstabSR)
     vAddedEPSBEstabSR       = np.asarray(vAddedEPSBEstabSR)
+    vIPThp_qci              = np.asarray(vIPThp_qci)
 
 
-    # Step 4. Plot computed KPI.
-    # The E-RAB Accessibility KPI has two parts: initial E-RAB establishment
+    # Step 4. Plot computed KPIs.
+
+    # 4a) The E-RAB Accessibility KPI has two parts: initial E-RAB establishment
     # success rate, and additional E-RAB establishment success rate. kpi.Calc
     # provides both of them in the form of their confidence intervals. The
     # lower margin of the confidence interval coincides with 3GPP definition of
@@ -110,8 +116,15 @@ def main():
     #
     # For each of the parts we plot both its lower margin and the whole
     # confidence interval area.
-    fig = plt.figure(constrained_layout=True, figsize=(6,8))
-    figplot_erab_accessibility  (fig, vτ, vInititialEPSBEstabSR, vAddedEPSBEstabSR, tperiod)
+
+    # 4b) The E-UTRAN IP Throughput KPI provides throughput measurements for
+    # all QCIs and does not have uncertainty. QCIs for which throughput data is
+    # all zeros are said to be silent and are not plotted.
+
+    fig = plt.figure(constrained_layout=True, figsize=(12,8))
+    facc, fthp = fig.subfigures(1, 2)
+    figplot_erab_accessibility  (facc, vτ, vInititialEPSBEstabSR, vAddedEPSBEstabSR, tperiod)
+    figplot_eutran_ip_throughput(fthp, vτ, vIPThp_qci, tperiod)
     plt.show()
 
 
@@ -127,6 +140,27 @@ def figplot_erab_accessibility(fig: plt.Figure, vτ, vInititialEPSBEstabSR, vAdd
 
     plot_success_rate(ax1, vτ, vInititialEPSBEstabSR, "InititialEPSBEstabSR")
     plot_success_rate(ax2, vτ, vAddedEPSBEstabSR,     "AddedEPSBEstabSR")
+
+
+# figplot_eutran_ip_throughput plots E-UTRAN IP Throughput KPI data on the figure.
+def figplot_eutran_ip_throughput(fig: plt.Figure, vτ, vIPThp_qci, tperiod=None):
+    ax1, ax2 = fig.subplots(2, 1, sharex=True)
+    fig.suptitle("E-UTRAN IP Throughput / %s" % (tpretty(tperiod)  if tperiod is not None else
+                                                 vτ_period_pretty(vτ)))
+    ax1.set_title("Downlink")
+    ax2.set_title("Uplink")
+    ax1.set_ylabel("Mbit/s")
+    ax2.set_ylabel("Mbit/s")
+
+    v_qci = (vIPThp_qci .view(np.float64) / 1e6) \
+                        .view(vIPThp_qci.dtype)
+    plot_per_qci(ax1, vτ, v_qci[:,:]['dl'], 'IPThp')
+    plot_per_qci(ax2, vτ, v_qci[:,:]['ul'], 'IPThp')
+
+    _, dmax = ax1.get_ylim()
+    _, umax = ax2.get_ylim()
+    ax1.set_ylim(ymin=0, ymax=dmax*1.05)
+    ax2.set_ylim(ymin=0, ymax=umax*1.05)
 
 
 # plot_success_rate plots success-rate data from vector v on ax.
@@ -145,12 +179,39 @@ def plot_success_rate(ax, vτ, v, label):
     ax.legend(loc='upper left')
 
 
+# plot_per_qci plots data from per-QCI vector v_qci.
+#
+# v_qci should be array[t, QCI].
+# QCIs, for which v[:,qci] is all zeros, are said to be silent and are not plotted.
+def plot_per_qci(ax, vτ, v_qci, label):
+    ax.set_xlim((vτ[0], vτ[-1]))  # to have correct x range even if we have no data
+    assert len(v_qci.shape) == 2
+    silent = True
+    propv = list(plt.rcParams['axes.prop_cycle'])
+    for qci in range(v_qci.shape[1]):
+        v = v_qci[:, qci]
+        if (v['hi'] == 0).all():  # skip silent QCIs
+            continue
+        silent = False
+        prop = propv[qci % len(propv)]  # to have same colors for same qci in different graphs
+        ax.plot(vτ, v['lo'], label="%s.%d" % (label, qci), **prop)
+        ax.fill_between(vτ, v['lo'], v['hi'], alpha=0.3, **prop)
+
+    if silent:
+        ax.plot([],[], ' ', label="all QCI silent")
+
+    fmt_dates_pretty(ax.xaxis)
+    ax.grid(True)
+    ax.legend(loc='upper left')
+
+
 # fmt_dates_pretty instructs axis to use concise dates formatting.
 def fmt_dates_pretty(axis):
     xloc = mdates.AutoDateLocator()
     xfmt = mdates.ConciseDateFormatter(xloc)
     axis.set_major_locator(xloc)
     axis.set_major_formatter(xfmt)
+    axis.set_minor_locator(ticker.AutoMinorLocator(5))
 
 
 # tpretty returns pretty form for time, e.g. 1'2" for 62 seconds.
