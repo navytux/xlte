@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Based on https://lab.nexedi.com/nexedi/zodbtools/blob/master/zodbtools/zodb.py
-# Copyright (C) 2017-2022  Nexedi SA and Contributors.
+# Copyright (C) 2017-2023  Nexedi SA and Contributors.
 #                          Kirill Smelkov <kirr@nexedi.com>
 #                          Jérome Perrin <jerome@nexedi.com>
 #
@@ -29,6 +29,10 @@ from xlte.amari import help as help_module
 import getopt
 import importlib
 import sys
+
+from golang import func, defer, chan, go
+from golang import context, os as gos, syscall
+from golang.os import signal
 
 
 # command_name -> command_module
@@ -97,6 +101,7 @@ def help(argv):
     sys.exit(2)
 
 
+@func
 def main():
     try:
         optv, argv = getopt.getopt(sys.argv[1:], "h", ["help"])
@@ -127,7 +132,24 @@ def main():
         print("Run 'xamari help' for usage.", file=sys.stderr)
         sys.exit(2)
 
-    return command_module.main(argv)
+    # SIGINT/SIGTERM -> ctx cancel
+    ctx, cancel = context.with_cancel(context.background())
+    sigq = chan(1, dtype=gos.Signal)
+    signal.Notify(sigq, syscall.SIGINT, syscall.SIGTERM)
+    def _():
+        signal.Stop(sigq)
+        sigq.close()
+    defer(_)
+    def _(cancel):
+        sig, ok = sigq.recv_()
+        if not ok:
+            return
+        print("# %s" % sig, file=sys.stderr)
+        cancel()
+    go(_, cancel)
+    defer(cancel)
+
+    return command_module.main(ctx, argv)
 
 
 if __name__ == '__main__':

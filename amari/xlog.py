@@ -62,8 +62,8 @@ from xlte import amari
 
 import json
 import traceback
-from golang import func, defer
-from golang import time
+from golang import func, defer, chan, select
+from golang import context, sync, time
 from golang.gcompat import qq
 
 import logging; log = logging.getLogger('xlte.amari.xlog')
@@ -124,7 +124,7 @@ class LogSpec:
 
 # xlog queries service @wsuri periodically according to queries specified by
 # logspecv and logs the result.
-def xlog(wsuri, logspecv):
+def xlog(ctx, wsuri, logspecv):
     xl = _XLogger(wsuri, logspecv)
 
     slogspecv = ' '.join(['%s' % _ for _ in logspecv])
@@ -132,8 +132,10 @@ def xlog(wsuri, logspecv):
 
     while 1:
         try:
-            xl.xlog1()
+            xl.xlog1(ctx)
         except Exception as ex:
+            if ctx.err() is not None:
+                raise
             if not isinstance(ex, amari.ConnError):
                 log.exception('xlog failure:')
                 try:
@@ -164,10 +166,10 @@ class _XLogger:
 
     # xlog1 performs one cycle of attach/log,log,log.../detach.
     @func
-    def xlog1(xl):
+    def xlog1(xl, ctx):
         # connect to the service
         try:
-            conn = amari.connect(xl.wsuri)
+            conn = amari.connect(ctx, xl.wsuri)
         except Exception as ex:
             xl.jemit("service connect failure", {"reason": str(ex)})
             if not isinstance(ex, amari.ConnError):
@@ -191,14 +193,18 @@ class _XLogger:
                     raise
         defer(_)
 
-        xl._xlog1(conn)
+        wg = sync.WorkGroup(ctx)
+        defer(wg.wait)
+
+        # spawn main logger
+        wg.go(xl._xlog1, conn)
 
 
-    def _xlog1(xl, conn):
+    def _xlog1(xl, ctx, conn):
+
         # emit config_get after attach
         _, cfg_raw = conn.req_('config_get', {})
         xl.emit(cfg_raw)
-
 
         # loop emitting requested logspecs
         t0 = time.now()
@@ -234,7 +240,12 @@ class _XLogger:
             tarm = t0 + tmin
             δtsleep = tarm - tnow
             if δtsleep > 0:
-                time.sleep(δtsleep)
+                _, _rx = select(
+                    ctx.done().recv,            # 0
+                    time.after(δtsleep).recv,   # 1
+                )
+                if _ == 0:
+                    raise ctx.err()
 
             _, resp_raw = conn.req_(logspec.query, opts)
             xl.emit(resp_raw)
@@ -431,7 +442,7 @@ Options:
 """ % LogSpec.DEFAULT_PERIOD, file=out)
 
 
-def main(argv):
+def main(ctx, argv):
     try:
         optv, argv = getopt.getopt(argv[1:], "h", ["help"])
     except getopt.GetoptError as e:
@@ -454,4 +465,4 @@ def main(argv):
     for arg in argv[1:]:
         logspecv.append( LogSpec.parse(arg) )
 
-    xlog(wsuri, logspecv)
+    xlog(ctx, wsuri, logspecv)
