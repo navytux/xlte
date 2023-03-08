@@ -24,7 +24,7 @@
 - use Reader to read logged information from xlog.
 
 
-(*) for example result of stats, ue_get and erab_get queries.
+(*) for example result of stats, ue_get, erab_get and synthetic queries.
 """
 
 # XLog protocol
@@ -59,6 +59,7 @@
 
 
 from xlte import amari
+from xlte.amari import drb
 
 import json
 import traceback
@@ -196,14 +197,32 @@ class _XLogger:
         wg = sync.WorkGroup(ctx)
         defer(wg.wait)
 
+        # spawn servers to handle queries with synthetic messages
+        xmsgsrv_dict = {}
+        for l in xl.logspecv:
+            if l.query in _xmsg_registry:
+                xsrv = _XMsgServer(l.query, _xmsg_registry[l.query])
+                xmsgsrv_dict[l.query] = xsrv
+                xsrv_ready = chan() # wait for xmsg._runCtx to be initialized
+                wg.go(xsrv.run, conn, xsrv_ready)
+                xsrv_ready.recv()
+
         # spawn main logger
-        wg.go(xl._xlog1, conn)
+        wg.go(xl._xlog1, conn, xmsgsrv_dict)
 
 
-    def _xlog1(xl, ctx, conn):
+    def _xlog1(xl, ctx, conn, xmsgsrv_dict):
+        # req_ queries either amari service directly, or an extra message service.
+        def req_(ctx, query, opts):  # -> resp_raw
+            if query in xmsgsrv_dict:
+                query_xsrv = xmsgsrv_dict[query]
+                _, resp_raw = query_xsrv.req_(ctx, opts)
+            else:
+                _, resp_raw = conn.req_(ctx, query, opts)
+            return resp_raw
 
         # emit config_get after attach
-        _, cfg_raw = conn.req_('config_get', {})
+        cfg_raw = req_(ctx, 'config_get', {})
         xl.emit(cfg_raw)
 
         # loop emitting requested logspecs
@@ -247,8 +266,81 @@ class _XLogger:
                 if _ == 0:
                     raise ctx.err()
 
-            _, resp_raw = conn.req_(logspec.query, opts)
+            resp_raw = req_(ctx, logspec.query, opts)
             xl.emit(resp_raw)
+
+
+# _XMsgServer represents a server for handling particular synthetic requests.
+#
+# for example the server for synthetic x.drb_stats query.
+class _XMsgServer:
+    def __init__(xsrv, name, f):
+        xsrv.name = name        # str               message name, e.g. "x.drb_stats"
+        xsrv._func = f          # func(ctx, conn)   to run the service
+        xsrv._reqch = chan()    # chan<respch>      to send requests to the service
+        xsrv._runCtx = None     # context           not done while .run is running
+
+    # run runs the extra server on amari service attached to via conn.
+    @func
+    def run(xsrv, ctx, conn: amari.Conn, ready: chan):
+        xsrv._runCtx, cancel = context.with_cancel(ctx)
+        defer(cancel)
+        ready.close()
+        # establish dedicated conn2 so that server does not semantically
+        # affect requests issued by main logger. For example if we do not and
+        # main logger queries stats, and x.drb_stats server also queries stats
+        # internally, then data received by main logger will cover only small
+        # random period of time instead of full wanted period.
+        conn2 = amari.connect(ctx, conn.wsuri)
+        defer(conn2.close)
+        xsrv._func(ctx, xsrv._reqch, conn2)
+
+    # req queries the server and returns its response.
+    @func
+    def req_(xsrv, ctx, opts):  # -> resp, resp_raw
+        origCtx = ctx
+        ctx, cancel = context.merge(ctx, xsrv._runCtx)  # need only merge_cancel
+        defer(cancel)
+
+        respch = chan(1)
+        _, _rx = select(
+            ctx.done().recv,                        # 0
+            (xsrv._reqch.send, (opts, respch)),     # 1
+        )
+        if _ == 0:
+            if xsrv._runCtx.err()  and  not origCtx.err():
+                raise RuntimeError("%s server is down" % xsrv.name)
+            raise ctx.err()
+
+        _, _rx = select(
+            ctx.done().recv,    # 0
+            respch.recv,        # 1
+        )
+        if _ == 0:
+            if xsrv._runCtx.err()  and  not origCtx.err():
+                raise RuntimeError("%s server is down" % xsrv.name)
+            raise ctx.err()
+        resp = _rx
+
+        r = {'message': xsrv.name}  # place 'message' first
+        r.update(resp)
+        resp = r
+
+        resp_raw = json.dumps(resp,
+                              separators=(',', ':'),  # most compact, like Amari does
+                              ensure_ascii=False)     # so that e.g. δt comes as is
+        return resp, resp_raw
+
+
+# @_xmsg registers func f to provide server for extra messages with specified name.
+_xmsg_registry = {} # name -> xsrv_func(ctx, reqch, conn)
+def _xmsg(name, f, doc1):
+    assert name not in _xmsg_registry
+    f.xlog_doc1 = doc1
+    _xmsg_registry[name] = f
+
+_xmsg("x.drb_stats", drb._x_stats_srv, "retrieve statistics about data radio bearers")
+
 
 
 # ----------------------------------------
@@ -435,11 +527,18 @@ Example for <logspec>+:
 
     stats[samples,rf]/30s  ue_get[stats]  erab_get/10s  qos_flow_get
 
+Besides queries supported by Amarisoft LTE stack natively, support for the
+following synthetic queries is also provided:
+
+%s
 
 Options:
 
     -h  --help            show this help
-""" % LogSpec.DEFAULT_PERIOD, file=out)
+""" % (LogSpec.DEFAULT_PERIOD,
+       '\n'.join("    %-14s %s" % (q, f.xlog_doc1)
+                for q, f in sorted(_xmsg_registry.items()))),
+file=out)
 
 
 def main(ctx, argv):
