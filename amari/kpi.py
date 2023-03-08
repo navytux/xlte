@@ -51,6 +51,8 @@ class LogMeasure:
     #               \/ None
     # ._m           kpi.Measurement being prepared covering [_estats_prev, _estats) | None
     # ._m_next      kpi.Measurement being prepared covering [_estats, _estats_next) | None
+    #
+    # ._drb_stats   last xlog.Message with x.drb_stats | None   ; reset on error|event
     pass
 
 
@@ -66,6 +68,7 @@ def __init__(logm, rxlog, rlog):
     logm._estats = None
     logm._m = None
     logm._m_next = None
+    logm._drb_stats = None
 
 # close releases resources associated with LogMeasure and closes underlying readers.
 @func(LogMeasure)
@@ -109,6 +112,7 @@ def _read(logm):
         _trace('._m:     \t', logm._m)
         _trace('._estats:\t', logm._estats)
         _trace('._m_next:\t', logm._m_next)
+        _trace('._drb_stats:\t', logm._drb_stats)
 
         if m is not None:
             return m
@@ -151,6 +155,9 @@ def _read(logm):
 
         # handle messages that update current Measurement
         if isinstance(x, xlog.Message):
+            if x.message == "x.drb_stats":
+                logm._handle_drb_stats(x)
+                continue
             if x.message != "stats":
                 continue    # ignore other messages
 
@@ -175,6 +182,7 @@ def _read(logm):
 
         if isinstance(x, (xlog.Event, LogError)):
             logm._estats = x # it is ok to forget previous event after e.g. bad line with ParseError
+            logm._drb_stats = None # reset ._drb_stats at an error or event
             continue         # flush the queue
 
         assert isinstance(x, xlog.Message)
@@ -351,6 +359,109 @@ def _stats_cc(stats: xlog.Message, counter: str):
         cc_dict = stats['counters']
 
     return cc_dict['messages'].get(counter, 0)
+
+
+# _handle_drb_stats handles next x.drb_stats xlog entry upon _read request.
+@func(LogMeasure)
+def _handle_drb_stats(logm, drb_stats: xlog.Message):
+    # TODO precheck for correct message structure similarly to _stats_check
+
+    drb_stats_prev = logm._drb_stats
+    logm._drb_stats = drb_stats
+
+    # first drb_stats after an event - we don't know which time period it covers
+    if drb_stats_prev is None:
+        return
+
+    assert isinstance(drb_stats_prev, xlog.Message)
+    assert drb_stats_prev.message == "x.drb_stats"
+
+    # time coverage for current drb_stats
+    τ_lo = drb_stats_prev.timestamp
+    τ_hi = drb_stats.timestamp
+    δτ = τ_hi - τ_lo
+
+    # see with which ._m or ._m_next, if any, drb_stats overlaps with ≥ 50% of
+    # time first, and update that measurement correspondingly.
+    if not (δτ > 0):
+        return
+
+    if logm._m is not None:
+        m_lo = logm._m['X.Tstart']
+        m_hi = m_lo + logm._m['X.δT']
+
+        d = max(0, min(τ_hi, m_hi) -
+                   max(τ_lo, m_lo))
+        if d >= δτ/2:  # NOTE ≥ 50%, not > 50% not to skip drb_stats if fill is exactly 50%
+            _drb_update(logm._m, drb_stats)
+            return
+
+    if logm._m_next is not None:
+        n_lo = logm._m_next['X.Tstart']
+        # n_hi - don't know as _m_next['X.δT'] is ø yet
+
+        d = max(0,     τ_hi        -
+                   max(τ_lo, n_lo))
+        if d >= δτ/2:
+            _drb_update(logm._m_next, drb_stats)
+            return
+
+# _drb_update updates Measurement from dl/ul DRB statistics related to measurement's time coverage.
+def _drb_update(m: kpi.Measurement, drb_stats: xlog.Message):
+    # TODO Exception -> LogError("internal failure") similarly to _handle_stats
+    qci_trx = drb_stats.get1("qci_dict", dict)
+
+    for dir in ('dl', 'ul'):
+        qvol      = m['DRB.IPVol%s.QCI'          % dir.capitalize()]
+        qtime     = m['DRB.IPTime%s.QCI'         % dir.capitalize()]
+        qtime_err = m['XXX.DRB.IPTime%s_err.QCI' % dir.capitalize()]
+
+        # qci_dict carries entries only for qci's with non-zero values, but if
+        # we see drb_stats we know we have information for all qcis.
+        # -> pre-initialize to zero everything
+        if kpi.isNA(qvol).all():        qvol[:]      = 0
+        if kpi.isNA(qtime).all():       qtime[:]     = 0
+        if kpi.isNA(qtime_err).all():   qtime_err[:] = 0
+
+        for qci_str, trx in qci_trx.items():
+            qci = int(qci_str)
+
+            # DRB.IPVol and DRB.IPTime are collected to compute throughput.
+            #
+            # thp = ΣB*/ΣT*  where B* is tx'ed bytes in the sample without taking last tti into account
+            #                and   T* is time of tx also without taking that sample's tail tti.
+            #
+            # we only know ΣB (whole amount of tx), ΣT and ΣT* with some error.
+            #
+            # -> thp can be estimated to be inside the following interval:
+            #
+            #          ΣB            ΣB
+            #         ───── ≤ thp ≤ ─────           (1)
+            #         ΣT_hi         ΣT*_lo
+            #
+            # the upper layer in xlte.kpi will use the following formula for
+            # final throughput calculation:
+            #
+            #               DRB.IPVol
+            #         thp = ──────────              (2)
+            #               DRB.IPTime
+            #
+            # -> set DRB.IPTime and its error to mean and δ of ΣT_hi and ΣT*_lo
+            # so that (2) becomes (1).
+
+            # FIXME we account whole PDCP instead of only IP traffic
+            ΣB      = trx['%s_tx_bytes' % dir]
+            ΣT      = trx['%s_tx_time'  % dir]
+            ΣT_err  = trx['%s_tx_time_err'  % dir]
+            ΣTT     = trx['%s_tx_time_notailtti' % dir]
+            ΣTT_err = trx['%s_tx_time_notailtti_err' % dir]
+
+            ΣT_hi   = ΣT + ΣT_err
+            ΣTT_lo  = ΣTT - ΣTT_err
+
+            qvol[qci]      = 8*ΣB   # in bits
+            qtime[qci]     = (ΣT_hi + ΣTT_lo) / 2
+            qtime_err[qci] = (ΣT_hi - ΣTT_lo) / 2
 
 
 # LogError(timestamp|None, *argv).

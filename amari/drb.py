@@ -27,7 +27,10 @@
   information is emitted in the form of synthetic x.drb_stats message whose
   generation is integrated into amari.xlog package.
 
-See the following related 3GPP standards references:
+Please see amari.kpi package that turns x.drb_stats data into
+measurements related to E-UTRAN IP Throughput KPI.
+
+See also the following related 3GPP standards references:
 
     - TS 32.450 6.3.1 "E-UTRAN IP Throughput"
     - TS 32.425 4.4.6 "IP Throughput measurements"

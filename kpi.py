@@ -183,6 +183,8 @@ class Measurement(np.void):
         ('DRB.IPVolUl.QCI',                 np.int64),  # bit       4.4.6.4  32.450:6.3.1   NOTE not kbit
         ('DRB.IPTimeDl.QCI',                Ttime),     # s         4.4.6.5  32.450:6.3.1   NOTE not ms
         ('DRB.IPTimeUl.QCI',                Ttime),     # s         4.4.6.6  32.450:6.3.1   NOTE not ms
+        ('XXX.DRB.IPTimeDl_err.QCI',        Ttime),     # s         XXX error for DRB.IPTimeDl.QCI (will be removed)
+        ('XXX.DRB.IPTimeUl_err.QCI',        Ttime),     # s         XXX error for DRB.IPTimeUl.QCI (will be removed)
 
         ('RRU.CellUnavailableTime.CAUSE',   Ttime),     # s         4.5.6
 
