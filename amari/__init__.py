@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -53,13 +53,14 @@ def connect(wsuri):  # -> Conn
         ws.connect(wsuri)
     except Exception as ex:
         raise ConnError("connect") from ex
-    return Conn(ws)
+    return Conn(ws, wsuri)
 
 # Conn represents WebSocket connection to a service.
 #
 # It provides functionality to issue requests, and (TODO) to receive notifications.
 # Conn should be created via connect.
 class Conn:
+    # .wsuri            websocket uri of the service
     # ._ws              websocket connection to service
     # ._srv_ready_msg   message we got for "ready"
 
@@ -71,7 +72,7 @@ class Conn:
     # ._rx_wg           sync.WorkGroup for spawned _serve_recv
     # ._down_once       sync.Once
 
-    def __init__(conn, ws):
+    def __init__(conn, ws, wsuri):
         try:
             msg0_raw = ws.recv()
             msg0 = json.loads(msg0_raw)
@@ -82,6 +83,7 @@ class Conn:
             ws.close()
             raise ConnError("handshake") from ex
 
+        conn.wsuri = wsuri
         conn._ws = ws
         conn._srv_ready_msg = msg0
 
