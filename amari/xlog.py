@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -180,14 +180,18 @@ class _XLogger:
                     "srv_type": conn.srv_type,
                     "srv_version": conn.srv_version}
         xl.jemit("service attach", srv_info)
-        try:
-            xl._xlog1(conn)
-        except Exception as ex:
-            d = srv_info.copy()
-            d['reason'] = str(ex)
-            xl.jemit("service detach", d)
-            if not isinstance(ex, amari.ConnError):
+        def _():
+            try:
                 raise
+            except Exception as ex:
+                d = srv_info.copy()
+                d['reason'] = str(ex)
+                xl.jemit("service detach", d)
+                if not isinstance(ex, amari.ConnError):
+                    raise
+        defer(_)
+
+        xl._xlog1(conn)
 
 
     def _xlog1(xl, conn):
