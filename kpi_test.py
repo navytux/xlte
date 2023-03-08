@@ -34,7 +34,7 @@ def test_Measurement():
     _('X.Tstart')                       # time
     _('RRC.ConnEstabAtt.sum')           # Tcc
     _('DRB.PdcpSduBitrateDl.sum')       # float32
-    _('DRB.IPThpVolDl.sum')             # int64
+    _('DRB.IPVolDl.sum')                # int64
     # everything automatically
     for name in m.dtype.names:
         _(name)

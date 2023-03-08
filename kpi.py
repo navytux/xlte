@@ -178,11 +178,11 @@ class Measurement(np.void):
         # TODO mean -> total + npkt?
         #('DRB.IPLatDl.QCI',                Ttime),     # s         4.4.5.1  32.450:6.3.2   NOTE not ms
 
-        # DRB.IPThpX.QCI = DRB.IPThpVolX.QCI / DRB.IPThpTimeX.QCI
-        ('DRB.IPThpVolDl.QCI',              np.int64),  # bit       4.4.6.1  32.450:6.3.1   NOTE not kbit
-        ('DRB.IPThpVolUl.QCI',              np.int64),  # bit       4.4.6.2  32.450:6.3.1   NOTE not kbit
-        ('DRB.IPThpTimeDl.QCI',             Ttime),     # s
-        ('DRB.IPThpTimeUl.QCI',             Ttime),     # s
+        # DRB.IPThpX.QCI = DRB.IPVolX.QCI / DRB.IPTimeX.QCI         4.4.6.1-2 32.450:6.3.1
+        ('DRB.IPVolDl.QCI',                 np.int64),  # bit       4.4.6.3  32.450:6.3.1   NOTE not kbit
+        ('DRB.IPVolUl.QCI',                 np.int64),  # bit       4.4.6.4  32.450:6.3.1   NOTE not kbit
+        ('DRB.IPTimeDl.QCI',                Ttime),     # s         4.4.6.5  32.450:6.3.1   NOTE not ms
+        ('DRB.IPTimeUl.QCI',                Ttime),     # s         4.4.6.6  32.450:6.3.1   NOTE not ms
 
         ('RRU.CellUnavailableTime.CAUSE',   Ttime),     # s         4.5.6
 
