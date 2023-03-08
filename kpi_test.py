@@ -439,6 +439,61 @@ def test_Calc_erab_accessibility():
     _(InititialEPSBEstabSR, 100 * 2*3*4 / (7*8*9))
 
 
+# verify Calc.eutran_ip_throughput .
+def test_Calc_eutran_ip_throughput():
+    # most of the job is done by drivers collecting DRB.IPVol{Dl,Ul} and DRB.IPTime{Dl,Ul}
+    # here we verify final aggregation, that eutran_ip_throughput does, only lightly.
+    m = Measurement()
+    m['X.Tstart']   = 10
+    m['X.δT']       = 10
+
+    m['DRB.IPVolDl.5']  = 55e6
+    m['DRB.IPVolUl.5']  = 55e5
+    m['DRB.IPTimeDl.5'] =  1e2
+    m['DRB.IPTimeUl.5'] =  1e2
+
+    m['DRB.IPVolDl.7']  = 75e6
+    m['DRB.IPVolUl.7']  = 75e5
+    m['DRB.IPTimeDl.7'] =  1e2
+    m['DRB.IPTimeUl.7'] =  1e2
+
+    m['DRB.IPVolDl.9']  =    0
+    m['DRB.IPVolUl.9']  =    0
+    m['DRB.IPTimeDl.9'] =    0
+    m['DRB.IPTimeUl.9'] =    0
+
+    for qci in {5,7,9}:
+        m['XXX.DRB.IPTimeDl_err.QCI'][qci] = 0
+        m['XXX.DRB.IPTimeUl_err.QCI'][qci] = 0
+
+    # (other QCIs are left with na)
+    for qci in set(range(nqci)).difference({5,7,9}):
+        assert isNA(m['DRB.IPVolDl.QCI'][qci])
+        assert isNA(m['DRB.IPVolUl.QCI'][qci])
+        assert isNA(m['DRB.IPTimeDl.QCI'][qci])
+        assert isNA(m['DRB.IPTimeUl.QCI'][qci])
+        assert isNA(m['XXX.DRB.IPTimeDl_err.QCI'][qci])
+        assert isNA(m['XXX.DRB.IPTimeUl_err.QCI'][qci])
+
+    mlog = MeasurementLog()
+    mlog.append(m)
+
+    calc = Calc(mlog, 10,20)
+
+    thp = calc.eutran_ip_throughput()
+    def I(x): return Interval(x,x)
+    assert thp[5]['dl'] == I(55e4)
+    assert thp[5]['ul'] == I(55e3)
+    assert thp[7]['dl'] == I(75e4)
+    assert thp[7]['ul'] == I(75e3)
+    assert thp[9]['dl'] == I(0)
+    assert thp[9]['ul'] == I(0)
+
+    for qci in set(range(nqci)).difference({5,7,9}):
+        assert thp[qci]['dl'] == I(0)
+        assert thp[qci]['ul'] == I(0)
+
+
 # verify Σqci.
 def test_Σqci():
     m = Measurement()

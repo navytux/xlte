@@ -21,7 +21,7 @@
 
 - Calc is KPI calculator. It can be instantiated on MeasurementLog and time
   interval over which to perform computations. Use Calc methods such as
-  .erab_accessibility() to compute KPIs.
+  .erab_accessibility() and .eutran_ip_throughput() to compute KPIs.
 
 - MeasurementLog maintains journal with result of measurements. Use .append()
   to populate it with data.
@@ -58,6 +58,7 @@ from golang import func
 # following methods for computing 3GPP KPIs:
 #
 #   .erab_accessibility()    -  TS 32.450 6.1.1 "E-RAB Accessibility"
+#   .eutran_ip_throughput()  -  TS 32.450 6.3.1 "E-UTRAN IP Throughput"
 #   TODO other KPIs
 #
 # Upon construction specified time interval is potentially widened to cover
@@ -587,6 +588,71 @@ def _success_rate(calc, fini, init): # -> Interval in [0,1]
     a =  Σfini                   / (Σinit + init_)
     b = (Σfini + init_ + Σufini) / (Σinit + init_)
     return Interval(a,b)
+
+
+# eutran_ip_throughput computes "E-UTRAN IP Throughput" KPI.
+#
+# It returns the following:
+#
+#   - IPThp[QCI][dl,ul]         IP throughput per QCI for downlink and uplink   (bit/s)
+#
+# All elements are returned as Intervals with information about confidence for
+# computed values.
+#
+# NOTE: the unit of the result is bit/s, not kbit/s.
+#
+# 3GPP reference: TS 32.450 6.3.1 "E-UTRAN IP Throughput".
+@func(Calc)
+def eutran_ip_throughput(calc): # -> IPThp[QCI][dl,ul]
+    qdlΣv  = np.zeros(nqci, dtype=np.float64)
+    qdlΣt  = np.zeros(nqci, dtype=np.float64)
+    qdlΣte = np.zeros(nqci, dtype=np.float64)
+    qulΣv  = np.zeros(nqci, dtype=np.float64)
+    qulΣt  = np.zeros(nqci, dtype=np.float64)
+    qulΣte = np.zeros(nqci, dtype=np.float64)
+
+    for m in calc._miter():
+        τ = m['X.δT']
+
+        for qci in range(nqci):
+            dl_vol      = m["DRB.IPVolDl.QCI"]          [qci]
+            dl_time     = m["DRB.IPTimeDl.QCI"]         [qci]
+            dl_time_err = m["XXX.DRB.IPTimeDl_err.QCI"] [qci]
+            ul_vol      = m["DRB.IPVolUl.QCI"]          [qci]
+            ul_time     = m["DRB.IPTimeUl.QCI"]         [qci]
+            ul_time_err = m["XXX.DRB.IPTimeUl_err.QCI"] [qci]
+
+            if isNA(dl_vol) or isNA(dl_time) or isNA(dl_time_err):
+                # don't account uncertainty - here it is harder to do compared
+                # to erab_accessibility and the benefit is not clear. Follow
+                # plain 3GPP spec for now.
+                pass
+            else:
+                qdlΣv[qci]  += dl_vol
+                qdlΣt[qci]  += dl_time
+                qdlΣte[qci] += dl_time_err
+
+            if isNA(ul_vol) or isNA(ul_time) or isNA(ul_time_err):
+                # no uncertainty accounting - see ^^^
+                pass
+            else:
+                qulΣv[qci]  += ul_vol
+                qulΣt[qci]  += ul_time
+                qulΣte[qci] += ul_time_err
+
+    thp = np.zeros(nqci, dtype=np.dtype([
+                            ('dl', Interval._dtype),
+                            ('ul', Interval._dtype),
+    ]))
+    for qci in range(nqci):
+        if qdlΣt[qci] > 0:
+            thp[qci]['dl']['lo'] = qdlΣv[qci] / (qdlΣt[qci] + qdlΣte[qci])
+            thp[qci]['dl']['hi'] = qdlΣv[qci] / (qdlΣt[qci] - qdlΣte[qci])
+        if qulΣt[qci] > 0:
+            thp[qci]['ul']['lo'] = qulΣv[qci] / (qulΣt[qci] + qulΣte[qci])
+            thp[qci]['ul']['hi'] = qulΣv[qci] / (qulΣt[qci] - qulΣte[qci])
+
+    return thp
 
 
 # _miter iterates through [.τ_lo, .τ_hi) yielding Measurements.
