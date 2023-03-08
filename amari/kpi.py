@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -46,9 +46,11 @@ class LogMeasure:
     # ._rxlog       IO reader for enb.xlog
     # ._rlog        IO reader for enb.log
     #
-    # ._event  currently handled xlog.Event | LogError | None
-    # ._stats  currently handled xlog.Message with last read stats result | None
-    # ._m      kpi.Measurement being prepared covering [_stats_prev, _stats) | None
+    # ._estats      \/ last xlog.Message with read stats result
+    #               \/ last xlog.Event | LogError
+    #               \/ None
+    # ._m           kpi.Measurement being prepared covering [_estats_prev, _estats) | None
+    # ._m_next      kpi.Measurement being prepared covering [_estats, _estats_next) | None
     pass
 
 
@@ -61,9 +63,9 @@ class LogMeasure:
 def __init__(logm, rxlog, rlog):
     logm._rxlog = xlog.Reader(rxlog)
     logm._rlog  = rlog
-    logm._event = None
-    logm._stats = None
+    logm._estats = None
     logm._m = None
+    logm._m_next = None
 
 # close releases resources associated with LogMeasure and closes underlying readers.
 @func(LogMeasure)
@@ -77,6 +79,7 @@ def close(logm):
 # It reads data from enb.xlog (TODO and enb.log) as needed.
 @func(LogMeasure)
 def read(logm):  # -> kpi.Measurement | None
+    _trace('\n\n  LogMeasure.read')
     m = logm._read()
     _trace('  <-', m)
     return m
@@ -99,41 +102,41 @@ def _read(logm):
     #
     #
     # (*) see kpi.Measurement documentation for more details about init/fini correction.
+    m = None  # kpi.Measurement to return
     while 1:
         _trace()
-        _trace('._event:\t', logm._event)
-        _trace('._stats:\t', logm._stats)
-        _trace('._m:    \t', logm._m)
+        _trace('m:       \t', m)
+        _trace('._m:     \t', logm._m)
+        _trace('._estats:\t', logm._estats)
+        _trace('._m_next:\t', logm._m_next)
 
-        # flush the queue fully at an error or an event, e.g. at "service detach".
-        event = logm._event
-        if event is not None:
-            # <- M for [stats_prev, stats)
+        if m is not None:
+            return m
+
+        # flush the queue at an error or an event, e.g. at "service detach".
+        estats = logm._estats
+        if isinstance(estats, (xlog.Event, LogError)):
+            # <- M for [estats_prev, estats)
             m = logm._m
             if m is not None:
                 logm._m = None
                 return m
-            # <- M(ø) for [stats, event)
-            stats = logm._stats
-            if stats is not None:
-                logm._stats = None
-                if event.timestamp is not None:
-                    m = kpi.Measurement()
-                    m['X.Tstart'] = stats.timestamp
-                    m['X.δT']     = event.timestamp - stats.timestamp
-                    return m
-            # <- error|EOF
-            if isinstance(event, LogError):
-                logm._event = None
-                if event is LogError.EOF:
-                    return None
-                raise event
+            # note ._m_next is not flushed:
+            # if ._m_next != None - it remains initialized with X.Tstart = estats.timestamp
 
-            # queue should be fully flushed now
-            assert logm._stats  is None
-            assert logm._m      is None
-            # event might remain non-none, e.g. "service detach", but not an error
-            assert isinstance(event, xlog.Event)
+            # <- error|EOF
+            if isinstance(estats, LogError):
+                logm._estats = None
+                if estats is LogError.EOF:
+                    return None
+                raise estats
+
+            # queue should be flushed now till including estats with
+            # event remaining non-none, e.g. "service detach", but not an error
+            assert logm._m is None
+            assert isinstance(logm._estats, xlog.Event)
+            assert isinstance(logm._m_next, kpi.Measurement)
+            assert logm._m_next['X.Tstart'] == logm._estats.timestamp
 
 
         # fetch next entry from xlog
@@ -145,35 +148,49 @@ def _read(logm):
 
         if x is None:
             x = LogError.EOF # represent EOF as LogError
-        if isinstance(x, LogError):
-            logm._event = x # it is ok to forget previous event after e.g. bad line with ParseError
-            continue        # flush the queue
 
-        elif isinstance(x, xlog.Event):
-            event_prev = logm._event
-            logm._event = x
-            if event_prev is None:
-                continue    # flush
+        # handle messages that update current Measurement
+        if isinstance(x, xlog.Message):
+            if x.message != "stats":
+                continue    # ignore other messages
 
-            # <- M(ø) for [event_prev, event)
-            assert event_prev.timestamp is not None # LogErrors are raised after queue flush
-            m = kpi.Measurement()
-            m['X.Tstart'] = event_prev.timestamp
-            m['X.δT']     = x.timestamp - event_prev.timestamp
-            return m
+
+        # it is an error, event or stats.
+        # if it is an event or stats -> finalize timestamp for _m_next.
+        # start building next _m_next covering [x, x_next).
+        # shift m <- ._m <- ._m_next <- (new Measurement | None for LogError)
+        # a LogError throws away preceding Measurement and does not start a new one after it
+        if logm._m_next is not None:
+            if not isinstance(x, LogError):
+                logm._m_next['X.δT'] = x.timestamp - logm._m_next['X.Tstart']
+            else:
+                logm._m_next = None # throw it away on seeing e.g. "stats, error"
+        m = logm._m
+        logm._m = logm._m_next
+        if not isinstance(x, LogError):
+            logm._m_next = kpi.Measurement()
+            logm._m_next['X.Tstart'] = x.timestamp # note X.δT remains NA until next stats|event
+        else:
+            logm._m_next = None
+
+        if isinstance(x, (xlog.Event, LogError)):
+            logm._estats = x # it is ok to forget previous event after e.g. bad line with ParseError
+            continue         # flush the queue
 
         assert isinstance(x, xlog.Message)
-        if x.message != "stats":
-            continue
-
-        m = logm._read_stats(x)
-        if m is not None:
-            return m
+        assert x.message == "stats"
+        logm._handle_stats(x, m)
+        # NOTE _handle_stats indicates logic error in x by setting ._estats to
+        # LogError instead of stats. However those LogErrors come with
+        # timestamp and are thus treated similarly to events: we do not throw
+        # away neither ._m, nor ._m_next like we do with LogErrors that
+        # represent errors at the log parsing level.
         continue
 
-# _read_stats handles next stats xlog entry upon _read request.
+
+# _handle_stats handles next stats xlog entry upon _read request.
 @func(LogMeasure)
-def _read_stats(logm, stats: xlog.Message):  # -> kpi.Measurement|None(to retry)
+def _handle_stats(logm, stats: xlog.Message, m_prev: kpi.Measurement):
     # build Measurement from stats' counters.
     #
     # we take δ(stats_prev, stat) and process it mapping Amarisoft counters to
@@ -207,37 +224,26 @@ def _read_stats(logm, stats: xlog.Message):  # -> kpi.Measurement|None(to retry)
     try:
         _stats_check(stats)
     except LogError as e:
-        event_prev = logm._event
-        logm._event = e
-        if event_prev is not None:
-            # <- M(ø) for [event, bad_stats)
-            m = kpi.Measurement()
-            m['X.Tstart'] = event_prev.timestamp
-            m['X.δT']     = stats.timestamp - event_prev.timestamp
-            return m
-        return None # flush
+        logm._estats = e  # stays M(ø) for [estats_prev, bad_stats)
+        return
 
     # stats is pre-checked to be good. push it to the queue.
-    stats_prev = logm._stats
-    logm._stats = stats
+    estats_prev = logm._estats
+    logm._estats = stats
 
-    # first stats after service attach -> M(ø)
-    if stats_prev is None:
-        event_prev = logm._event
-        if event_prev is not None:
-            # <- M(ø) for [event, stats)
-            logm._event = None
-            m = kpi.Measurement()
-            m['X.Tstart'] = event_prev.timestamp
-            m['X.δT']     = stats.timestamp - event_prev.timestamp
-            return m
-        return None
+    # first stats after e.g. service attach -> stays M(ø) for [event_prev, stats)
+    if estats_prev is None:
+        return
+    if isinstance(estats_prev, (xlog.Event, LogError)):
+        return
 
-    # we have 2 adjacent stats. Start building new Measurement from their δ.
+    assert isinstance(estats_prev, xlog.Message)
+    assert estats_prev.message == "stats"
+    stats_prev = estats_prev
+
+    # we have 2 adjacent stats. Adjust corresponding Measurement from their δ.
     # do init/fini correction if there was also third preceding stats message.
-    m = kpi.Measurement() # [stats_prev, stats)
-    m['X.Tstart'] = stats_prev.timestamp
-    m['X.δT']     = stats.timestamp - stats_prev.timestamp
+    m = logm._m.copy() # [stats_prev, stats)
 
     # δcc(counter) tells how specified cumulative counter changed since last stats result.
     def δcc(counter):
@@ -250,8 +256,8 @@ def _read_stats(logm, stats: xlog.Message):  # -> kpi.Measurement|None(to retry)
     # m_initfini populates m[init] and m[fini] from vinit and vfini values.
     # copy of previous ._m[fini] is correspondingly adjusted for init/fini correction.
     p = None
-    if logm._m is not None:
-        p = logm._m.copy()
+    if m_prev is not None:
+        p = m_prev.copy()
     def m_initfini(init, vinit, fini, vfini):
         m[init] = vinit
         m[fini] = vfini
@@ -303,13 +309,14 @@ def _read_stats(logm, stats: xlog.Message):  # -> kpi.Measurement|None(to retry)
             _ = e
             e = LogError(stats.timestamp, "internal failure")
             e.__cause__ = _
-        logm._stats = None
-        logm._event = e
-        return None
+        logm._estats = e
+        return
 
     # all adjustments and checks are over.
-    logm._m = m # we can now remember pre-built Measurement for current stats,
-    return p    # and return adjusted previous measurement, if it was there.
+    logm._m = m             # we can now remember our Measurement adjustments for current stats,
+    if m_prev is not None:  # and commit adjustments to previous measurement, if it was there.
+        m_prev.put((0,), p) # copy m_prev <- p
+    return
 
 
 # _stats_check verifies stats message to have required structure.

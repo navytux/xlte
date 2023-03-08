@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -61,6 +61,7 @@ class tLogMeasure:
 
     # xlog appends one line to enb.xlog.
     def xlog(t, line):
+        trace('xlog += %s' % line)
         line = b(line)
         assert b'\n' not in line
         pos = t._fxlog.tell()
@@ -121,24 +122,12 @@ def test_LogMeasure():
     _ = t.expect1
 
     # empty stats after first attach
-    t.xlog( jstats(0.7, {}) )
+    t.xlog( jstats(1, {}) )
     _('X.Tstart',                   0.02)
-    _('X.δT',                       0.7-0.02)
+    _('X.δT',                       1-0.02)
     t.expect_nodata()
-    t.read()
+    # note: no t.read() - see tstats
 
-    # further empty stats
-    t.xlog( jstats(1.0, {}) )
-    _('X.Tstart',                   0.7)
-    _('X.δT',                       1-0.7)
-    _('RRC.ConnEstabAtt.sum',       0)
-    _('RRC.ConnEstabSucc.sum',      0)
-    _('S1SIG.ConnEstabAtt',         0)
-    _('S1SIG.ConnEstabSucc',        0)
-    _('ERAB.EstabInitAttNbr.sum',   0)
-    _('ERAB.EstabInitSuccNbr.sum',  0)
-    _('ERAB.EstabAddAttNbr.sum',    0)
-    _('ERAB.EstabAddSuccNbr.sum',   0)
 
     # tstats is the verb to check handling of stats message.
     #
@@ -193,6 +182,21 @@ def test_LogMeasure():
         τ_xlog += 1
         τ_logm += 1
         counters_prev = {} # reset
+
+
+
+    # further empty stats
+    tstats({})
+    _('X.Tstart',                   1)
+    _('X.δT',                       1)
+    _('RRC.ConnEstabAtt.sum',       0)
+    _('RRC.ConnEstabSucc.sum',      0)
+    _('S1SIG.ConnEstabAtt',         0)
+    _('S1SIG.ConnEstabSucc',        0)
+    _('ERAB.EstabInitAttNbr.sum',   0)
+    _('ERAB.EstabInitSuccNbr.sum',  0)
+    _('ERAB.EstabAddAttNbr.sum',    0)
+    _('ERAB.EstabAddSuccNbr.sum',   0)
 
 
     # RRC.ConnEstab
@@ -373,17 +377,25 @@ def test_LogMeasure_badinput():
                     "  but only single-cell configurations are supported"):
             t.read()
     tbadcell(11, 0)
+    read_nodata(11, 1)
     tbadcell(12, 0)
+    read_nodata(12, 1)
     tbadcell(13, 2)
+    read_nodata(13, 1)
     tbadcell(14, 3)
 
     def tbadstats(τ, error):
         with raises(LogError, match="t%s: stats: %s" % (τ, error)):
             t.read()
+    read_nodata(14, 7)
     tbadstats(21, ":10/cells/1 no `counters`")
+    read_nodata(21, 1)
     tbadstats(22, ":11/cells/1/counters no `messages`")
+    read_nodata(22, 1)
     tbadstats(23, ":12/ no `counters`")
+    read_nodata(23, 1)
     tbadstats(24, ":13/counters no `messages`")
+    read_nodata(24, 7)
 
     readok(31, 5)           # 31-32
     def tbadline():
@@ -414,18 +426,19 @@ def test_LogMeasure_cc_wraparound():
 
     def readok(τ, CC_value):
         _('X.Tstart',   τ)
-        _('X.δT',       1)
-        _(CC,           CC_value)
+        _('X.δT',       int(τ+1)-τ)
+        if CC_value is not None:
+            _(CC,       CC_value)
+        else:
+            t.expect_nodata()
         t.read()
 
-    _('X.Tstart',   0.02)   # attach-1
-    _('X.δT',       0.98)
-    t.expect_nodata()
-    t.read()
-
+    readok(0.02, None)      # attach-1
     readok(1, 13)           # 1-2
+    readok(2, None)         # 2-3  M(ø)
     with raises(LogError, match=r"t3: cc %s↓  \(13 → 12\)" % cc):
-        t.read()            # 2-3
+        t.read()            # 2-3  raise
+    readok(3, None)         # 3-4  M(ø)
     readok(4, 10)           # 4-5
 
 
