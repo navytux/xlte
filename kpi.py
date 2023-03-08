@@ -220,18 +220,24 @@ class Interval(np.void):
 @func(Measurement)
 def __new__(cls):
     m = _newscalar(cls, cls._dtype)
-    for field in m.dtype.names:
+    for field in m._dtype0.names:
         fdtype = m.dtype.fields[field][0]
-        m[field] = NA(fdtype)
+        if fdtype.shape == ():
+            m[field] = NA(fdtype)           # scalar
+        else:
+            m[field][:] = NA(fdtype.base)   # subarray
     return m
 
 
 # _all_qci expands <name>.QCI into <name>.sum and [] of <name>.<qci> for all possible qci values.
+# TODO remove and use direct array access (after causes are expanded into array too)
+nqci = 256 # all possible QCIs ∈ [0,255], standard ones are described in 23.203 Table 6.1.7
 def _all_qci(name_qci: str): # -> name_sum, ()name_qciv
     if not name_qci.endswith(".QCI"):
         raise AssertionError("invalid name_qci %r: no .QCI suffix" % name_qci)
     name = name_qci[:-len(".QCI")]
-    return name+".sum", ()  # TODO add all possible QCIs    - TS 36.413 (S1AP)
+    name_qciv = tuple("%s.%d" % (name,q) for q in range(nqci))
+    return name+".sum", name_qciv
 
 # _all_cause expands <name>.CAUSE into <name>.sum and [] of <name>.<cause> for all possible cause values.
 def _all_cause(name_cause: str): # -> name_sum, ()name_causev
@@ -242,13 +248,16 @@ def _all_cause(name_cause: str): # -> name_sum, ()name_causev
 
 # expand all .QCI and .CAUSE in Measurement._dtype .
 def _():
-    expv = [] # of (name, typ)
+    # expand X.QCI -> X.sum  + X.QCI[nqci]
+    qnamev = []  # X from X.QCI
+    expv = []    # of (name, typ[, shape])
     for name in Measurement._dtype .names:
         typ   = Measurement._dtype .fields[name][0].type
         if name.endswith('.QCI'):
-           Σ, qciv = _all_qci(name)
-           for _ in (Σ,)+qciv:
-               expv.append((_, typ))
+            _ = name[:-len('.QCI')]
+            qnamev.append(_)
+            expv.append(('%s.sum' % _,  typ))        # X.sum
+            expv.append((name,          typ, nqci))  # X.QCI[nqci]
 
         elif name.endswith('.CAUSE'):
            Σ, causev = _all_cause(name)
@@ -258,7 +267,33 @@ def _():
         else:
             expv.append((name, typ))
 
-    Measurement._dtype = np.dtype(expv)
+    _dtype = np.dtype(expv)
+
+    # also provide .QCI aliases, e.g. X.5 -> X.QCI[5]
+    namev   = []
+    formatv = []
+    offsetv = []
+    for name in _dtype.names:
+        fd, off = _dtype.fields[name]
+        namev  .append(name)
+        formatv.append(fd)
+        offsetv.append(off)
+
+    for qname in qnamev:
+        qarr, off0 = _dtype.fields[qname+'.QCI']
+        assert len(qarr.shape) == 1
+        for qci in range(qarr.shape[0]):
+            namev  .append('%s.%d' % (qname, qci))
+            formatv.append(qarr.base)
+            offsetv.append(off0 + qci*qarr.base.itemsize)
+
+    Measurement._dtype0 = _dtype  # ._dtype without aliases
+    Measurement._dtype  = np.dtype({
+                            'names':   namev,
+                            'formats': formatv,
+                            'offsets': offsetv,
+    })
+    assert Measurement._dtype.itemsize == Measurement._dtype0.itemsize
 _()
 del _
 
@@ -268,21 +303,39 @@ del _
 @func(Measurement)
 def __repr__(m):
     initv = []
-    for field in m.dtype.names:
-        v = m[field]
-        if not isNA(v):
-            initv.append("%s=%r" % (field, v))
+    for field in m._dtype0.names:
+        vs = _vstr(m[field])
+        if vs != 'ø':
+            initv.append("%s=%s" % (field, vs))
     return "Measurement(%s)" % ', '.join(initv)
 
 # __str__ returns "(v1, v2, ...)".
 # NA values are represented as "ø".
+# .QCI arrays are represented as {qci₁:v₁ qci₂:v₂ ...} with zero values omitted.
+# if all values are NA - then the whole array is represented as ø.
 @func(Measurement)
 def __str__(m):
     vv = []
-    for field in m.dtype.names:
-        v = m[field]
-        vv.append('ø' if isNA(v) else str(v))
+    for field in m._dtype0.names:
+        vv.append(_vstr(m[field]))
     return "(%s)" % ', '.join(vv)
+
+# _vstr returns string representation of scalar or subarray v.
+def _vstr(v):  # -> str
+    if v.shape == ():                       # scalar
+        return 'ø' if isNA(v) else str(v)
+
+    assert len(v.shape) == 1
+    if isNA(v).all():                       # subarray full of ø
+        return 'ø'
+
+    va = []                                 # subarray with some non-ø data
+    for k in range(v.shape[0]):
+        if v[k] == 0:
+            continue
+        va.append('%d:%s' % (k, 'ø' if isNA(v[k]) else str(v[k])))
+    return "{%s}" % ' '.join(va)
+
 
 # ==, != for Measurement.
 @func(Measurement)
@@ -291,7 +344,10 @@ def __eq__(a, b):
     # return np.array_equal(a, b, equal_nan=True) # for NA==NA
     if not isinstance(b, Measurement):
         return False
-    return a.data.tobytes() == b.data.tobytes()
+    # cast to dtype without aliases to avoid
+    # "dtypes with overlapping or out-of-order fields are not representable as buffers"
+    return a.view(a._dtype0).data.tobytes() == \
+           b.view(b._dtype0).data.tobytes()
 
 @func(Measurement)
 def __ne__(a, b):
@@ -314,6 +370,8 @@ def _check_valid(m):
 
     for field in m.dtype.names:
         v = m[field]
+        if v.shape != ():   # skip subarrays - rely on aliases
+            continue
         if isNA(v):
             continue
 
@@ -359,8 +417,9 @@ def append(mlog, m: Measurement):
         if not (τ_ + δτ_ <= τ):
             raise AssertionError(".Tstart overlaps with previous measurement: %s ∈ [%s, %s)" %
                                     (τ, τ_, τ_ + δτ_))
-
-    _ = np.append(mlog._data, m)
+    _ = np.append(
+            mlog._data.view(Measurement._dtype0), # dtype0 because np.append does not handle aliased
+            m.view(Measurement._dtype0))          # fields as such and increases out itemsize
     mlog._data = _.view((Measurement, Measurement._dtype))  # np.append looses Measurement from dtype
 
 # forget_past deletes measurements with .Tstart ≤ Tcut
@@ -627,6 +686,7 @@ def _newscalar(typ, dtype):
     _ = np.zeros(shape=(), dtype=(typ, dtype))
     s = _[()]
     assert type(s) is typ
+    assert s.dtype == dtype
     return s
 
 
@@ -649,7 +709,9 @@ def NA(dtype):
 
 
 # isNA returns whether value represent NA.
-# value must be numpy scalar.
+#
+# returns True/False if value is scalar.
+# returns array(True/False) if value is array.
 def isNA(value):
     na = NA(value.dtype)
     if np.isnan(na):

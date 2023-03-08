@@ -18,7 +18,7 @@
 # See COPYING file for full licensing terms.
 # See https://www.nexedi.com/licensing for rationale and options.
 
-from xlte.kpi import Calc, MeasurementLog, Measurement, Interval, NA, isNA, Σqci, Σcause
+from xlte.kpi import Calc, MeasurementLog, Measurement, Interval, NA, isNA, Σqci, Σcause, nqci
 import numpy as np
 from pytest import raises
 
@@ -29,12 +29,18 @@ def test_Measurement():
 
     # verify that all fields are initialized to NA
     def _(name):
-        assert isNA(m[name])
+        v = m[name]
+        if v.shape == ():
+            assert isNA(v)          # scalar
+        else:
+            assert isNA(v).all()    # array
     # several fields explicitly
     _('X.Tstart')                       # time
     _('RRC.ConnEstabAtt.sum')           # Tcc
     _('DRB.PdcpSduBitrateDl.sum')       # float32
     _('DRB.IPVolDl.sum')                # int64
+    _('DRB.IPTimeDl.7')                 # .QCI alias
+    _('DRB.IPTimeDl.QCI')               # .QCI array
     # everything automatically
     for name in m.dtype.names:
         _(name)
@@ -45,16 +51,29 @@ def test_Measurement():
     assert m['S1SIG.ConnEstabAtt'] == 123
     m['RRC.ConnEstabAtt.sum'] = 17
     assert m['RRC.ConnEstabAtt.sum'] == 17
+    m['DRB.IPVolDl.QCI'][:] = 0
+    m['DRB.IPVolDl.5'] = 55
+    m['DRB.IPVolDl.7'] = NA(m['DRB.IPVolDl.7'].dtype)
+    m['DRB.IPVolDl.QCI'][9] = 99
+    assert m['DRB.IPVolDl.5'] == 55;  assert m['DRB.IPVolDl.QCI'][5] == 55
+    assert isNA(m['DRB.IPVolDl.7']);  assert isNA(m['DRB.IPVolDl.QCI'][7])
+    assert m['DRB.IPVolDl.9'] == 99;  assert m['DRB.IPVolDl.QCI'][9] == 99
+    for k in range(len(m['DRB.IPVolDl.QCI'])):
+        if k in {5,7,9}:
+            continue
+        assert m['DRB.IPVolDl.%d' % k] == 0
+        assert m['DRB.IPVolDl.QCI'][k] == 0
 
     # str/repr
-    assert repr(m) == "Measurement(RRC.ConnEstabAtt.sum=17, S1SIG.ConnEstabAtt=123)"
+    assert repr(m) == "Measurement(RRC.ConnEstabAtt.sum=17, DRB.IPVolDl.QCI={5:55 7:ø 9:99}, S1SIG.ConnEstabAtt=123)"
     s = str(m)
     assert s[0]  == '('
     assert s[-1] == ')'
     v = s[1:-1].split(', ')
-    vok = ['ø'] * len(m.dtype.names)
+    vok = ['ø'] * len(m._dtype0.names)
     vok[m.dtype.names.index("RRC.ConnEstabAtt.sum")]   = "17"
     vok[m.dtype.names.index("S1SIG.ConnEstabAtt")]     = "123"
+    vok[m.dtype.names.index("DRB.IPVolDl.QCI")]        = "{5:55 7:ø 9:99}"
     assert v == vok
 
     # verify that time fields has enough precision
@@ -431,7 +450,19 @@ def test_Σqci():
     m[x+'.sum'] = 123
     assert Σ() == 123
 
-    # TODO sum over individual causes (when implemented)
+    m[x+'.17']  = 17
+    m[x+'.23']  = 23
+    m[x+'.255'] = 255
+    assert Σ() == 123   # from .sum
+
+    m[x+'.sum'] = NA(m[x+'.sum'].dtype)
+    assert isNA(Σ())    # from array, but NA values lead to sum being NA
+
+    v = m[x+'.QCI']
+    l = len(v)
+    for i in range(l):
+        v[i] = 1 + i
+    assert Σ() == 1*l + (l-1)*l/2
 
 
 # verify Σcause.
