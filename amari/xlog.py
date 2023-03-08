@@ -147,7 +147,7 @@ def xlog(ctx, wsuri, logspecv):
 
         time.sleep(3)
 
-
+# _XLogger serves xlog implementation.
 class _XLogger:
     def __init__(xl, wsuri, logspecv):
         xl.wsuri    = wsuri
@@ -155,6 +155,7 @@ class _XLogger:
 
     # emit saves line to the log.
     def emit(xl, line):
+        assert isinstance(line, str)
         assert '\n' not in line, line
         print(line, flush=True)
 

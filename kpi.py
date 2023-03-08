@@ -76,7 +76,7 @@ class Calc:
     pass
 
 
-# MeasurementLog represent journal of performed Measurements.
+# MeasurementLog represents journal of performed Measurements.
 #
 # It semantically consists of
 #

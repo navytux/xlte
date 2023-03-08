@@ -72,7 +72,7 @@ class tLogMeasure:
     # _mok_init reinitializes ._mok with Measurement defaults.
     def _mok_init(t):
         t._mok = Measurement()
-        # init fields handled by amari.kpi to 0
+        # init fields extracted by amari.kpi from stats to 0
         # this will be default values to verify against
         for field in (
             'RRC.ConnEstabAtt.sum',
@@ -515,7 +515,7 @@ def test_LogMeasure_cc_wraparound():
     t.xlog( jstats(1, {}) )
     t.xlog( jstats(2, {cc: 13}) )
     t.xlog( jstats(3, {cc: 12}) )   # cc↓   - should be reported
-    t.xlog( jstats(4, {cc: 140}) )  # cc↑↑  - should should start afresh
+    t.xlog( jstats(4, {cc: 140}) )  # cc↑↑  - should start afresh
     t.xlog( jstats(5, {cc: 150}) )
 
     def readok(τ, CC_value):
