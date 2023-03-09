@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -21,7 +21,7 @@
 
 - Calc is KPI calculator. It can be instantiated on MeasurementLog and time
   interval over which to perform computations. Use Calc methods such as
-  .erab_accessibility() to compute KPIs.
+  .erab_accessibility() and .eutran_ip_throughput() to compute KPIs.
 
 - MeasurementLog maintains journal with result of measurements. Use .append()
   to populate it with data.
@@ -58,6 +58,7 @@ from golang import func
 # following methods for computing 3GPP KPIs:
 #
 #   .erab_accessibility()    -  TS 32.450 6.1.1 "E-RAB Accessibility"
+#   .eutran_ip_throughput()  -  TS 32.450 6.3.1 "E-UTRAN IP Throughput"
 #   TODO other KPIs
 #
 # Upon construction specified time interval is potentially widened to cover
@@ -75,7 +76,7 @@ class Calc:
     pass
 
 
-# MeasurementLog represent journal of performed Measurements.
+# MeasurementLog represents journal of performed Measurements.
 #
 # It semantically consists of
 #
@@ -178,11 +179,13 @@ class Measurement(np.void):
         # TODO mean -> total + npkt?
         #('DRB.IPLatDl.QCI',                Ttime),     # s         4.4.5.1  32.450:6.3.2   NOTE not ms
 
-        # DRB.IPThpX.QCI = DRB.IPThpVolX.QCI / DRB.IPThpTimeX.QCI
-        ('DRB.IPThpVolDl.QCI',              np.int64),  # bit       4.4.6.1  32.450:6.3.1   NOTE not kbit
-        ('DRB.IPThpVolUl.QCI',              np.int64),  # bit       4.4.6.2  32.450:6.3.1   NOTE not kbit
-        ('DRB.IPThpTimeDl.QCI',             Ttime),     # s
-        ('DRB.IPThpTimeUl.QCI',             Ttime),     # s
+        # DRB.IPThpX.QCI = DRB.IPVolX.QCI / DRB.IPTimeX.QCI         4.4.6.1-2 32.450:6.3.1
+        ('DRB.IPVolDl.QCI',                 np.int64),  # bit       4.4.6.3  32.450:6.3.1   NOTE not kbit
+        ('DRB.IPVolUl.QCI',                 np.int64),  # bit       4.4.6.4  32.450:6.3.1   NOTE not kbit
+        ('DRB.IPTimeDl.QCI',                Ttime),     # s         4.4.6.5  32.450:6.3.1   NOTE not ms
+        ('DRB.IPTimeUl.QCI',                Ttime),     # s         4.4.6.6  32.450:6.3.1   NOTE not ms
+        ('XXX.DRB.IPTimeDl_err.QCI',        Ttime),     # s         XXX error for DRB.IPTimeDl.QCI (will be removed)
+        ('XXX.DRB.IPTimeUl_err.QCI',        Ttime),     # s         XXX error for DRB.IPTimeUl.QCI (will be removed)
 
         ('RRU.CellUnavailableTime.CAUSE',   Ttime),     # s         4.5.6
 
@@ -220,18 +223,24 @@ class Interval(np.void):
 @func(Measurement)
 def __new__(cls):
     m = _newscalar(cls, cls._dtype)
-    for field in m.dtype.names:
+    for field in m._dtype0.names:
         fdtype = m.dtype.fields[field][0]
-        m[field] = NA(fdtype)
+        if fdtype.shape == ():
+            m[field] = NA(fdtype)           # scalar
+        else:
+            m[field][:] = NA(fdtype.base)   # subarray
     return m
 
 
 # _all_qci expands <name>.QCI into <name>.sum and [] of <name>.<qci> for all possible qci values.
+# TODO remove and use direct array access (after causes are expanded into array too)
+nqci = 256 # all possible QCIs ∈ [0,255], standard ones are described in 23.203 Table 6.1.7
 def _all_qci(name_qci: str): # -> name_sum, ()name_qciv
     if not name_qci.endswith(".QCI"):
         raise AssertionError("invalid name_qci %r: no .QCI suffix" % name_qci)
     name = name_qci[:-len(".QCI")]
-    return name+".sum", ()  # TODO add all possible QCIs    - TS 36.413 (S1AP)
+    name_qciv = tuple("%s.%d" % (name,q) for q in range(nqci))
+    return name+".sum", name_qciv
 
 # _all_cause expands <name>.CAUSE into <name>.sum and [] of <name>.<cause> for all possible cause values.
 def _all_cause(name_cause: str): # -> name_sum, ()name_causev
@@ -242,13 +251,16 @@ def _all_cause(name_cause: str): # -> name_sum, ()name_causev
 
 # expand all .QCI and .CAUSE in Measurement._dtype .
 def _():
-    expv = [] # of (name, typ)
+    # expand X.QCI -> X.sum  + X.QCI[nqci]
+    qnamev = []  # X from X.QCI
+    expv = []    # of (name, typ[, shape])
     for name in Measurement._dtype .names:
         typ   = Measurement._dtype .fields[name][0].type
         if name.endswith('.QCI'):
-           Σ, qciv = _all_qci(name)
-           for _ in (Σ,)+qciv:
-               expv.append((_, typ))
+            _ = name[:-len('.QCI')]
+            qnamev.append(_)
+            expv.append(('%s.sum' % _,  typ))        # X.sum
+            expv.append((name,          typ, nqci))  # X.QCI[nqci]
 
         elif name.endswith('.CAUSE'):
            Σ, causev = _all_cause(name)
@@ -258,7 +270,33 @@ def _():
         else:
             expv.append((name, typ))
 
-    Measurement._dtype = np.dtype(expv)
+    _dtype = np.dtype(expv)
+
+    # also provide .QCI aliases, e.g. X.5 -> X.QCI[5]
+    namev   = []
+    formatv = []
+    offsetv = []
+    for name in _dtype.names:
+        fd, off = _dtype.fields[name]
+        namev  .append(name)
+        formatv.append(fd)
+        offsetv.append(off)
+
+    for qname in qnamev:
+        qarr, off0 = _dtype.fields[qname+'.QCI']
+        assert len(qarr.shape) == 1
+        for qci in range(qarr.shape[0]):
+            namev  .append('%s.%d' % (qname, qci))
+            formatv.append(qarr.base)
+            offsetv.append(off0 + qci*qarr.base.itemsize)
+
+    Measurement._dtype0 = _dtype  # ._dtype without aliases
+    Measurement._dtype  = np.dtype({
+                            'names':   namev,
+                            'formats': formatv,
+                            'offsets': offsetv,
+    })
+    assert Measurement._dtype.itemsize == Measurement._dtype0.itemsize
 _()
 del _
 
@@ -268,21 +306,39 @@ del _
 @func(Measurement)
 def __repr__(m):
     initv = []
-    for field in m.dtype.names:
-        v = m[field]
-        if not isNA(v):
-            initv.append("%s=%r" % (field, v))
+    for field in m._dtype0.names:
+        vs = _vstr(m[field])
+        if vs != 'ø':
+            initv.append("%s=%s" % (field, vs))
     return "Measurement(%s)" % ', '.join(initv)
 
 # __str__ returns "(v1, v2, ...)".
 # NA values are represented as "ø".
+# .QCI arrays are represented as {qci₁:v₁ qci₂:v₂ ...} with zero values omitted.
+# if all values are NA - then the whole array is represented as ø.
 @func(Measurement)
 def __str__(m):
     vv = []
-    for field in m.dtype.names:
-        v = m[field]
-        vv.append('ø' if isNA(v) else str(v))
+    for field in m._dtype0.names:
+        vv.append(_vstr(m[field]))
     return "(%s)" % ', '.join(vv)
+
+# _vstr returns string representation of scalar or subarray v.
+def _vstr(v):  # -> str
+    if v.shape == ():                       # scalar
+        return 'ø' if isNA(v) else str(v)
+
+    assert len(v.shape) == 1
+    if isNA(v).all():                       # subarray full of ø
+        return 'ø'
+
+    va = []                                 # subarray with some non-ø data
+    for k in range(v.shape[0]):
+        if v[k] == 0:
+            continue
+        va.append('%d:%s' % (k, 'ø' if isNA(v[k]) else str(v[k])))
+    return "{%s}" % ' '.join(va)
+
 
 # ==, != for Measurement.
 @func(Measurement)
@@ -291,7 +347,10 @@ def __eq__(a, b):
     # return np.array_equal(a, b, equal_nan=True) # for NA==NA
     if not isinstance(b, Measurement):
         return False
-    return a.data.tobytes() == b.data.tobytes()
+    # cast to dtype without aliases to avoid
+    # "dtypes with overlapping or out-of-order fields are not representable as buffers"
+    return a.view(a._dtype0).data.tobytes() == \
+           b.view(b._dtype0).data.tobytes()
 
 @func(Measurement)
 def __ne__(a, b):
@@ -314,6 +373,8 @@ def _check_valid(m):
 
     for field in m.dtype.names:
         v = m[field]
+        if v.shape != ():   # skip subarrays - rely on aliases
+            continue
         if isNA(v):
             continue
 
@@ -359,8 +420,9 @@ def append(mlog, m: Measurement):
         if not (τ_ + δτ_ <= τ):
             raise AssertionError(".Tstart overlaps with previous measurement: %s ∈ [%s, %s)" %
                                     (τ, τ_, τ_ + δτ_))
-
-    _ = np.append(mlog._data, m)
+    _ = np.append(
+            mlog._data.view(Measurement._dtype0), # dtype0 because np.append does not handle aliased
+            m.view(Measurement._dtype0))          # fields as such and increases out itemsize
     mlog._data = _.view((Measurement, Measurement._dtype))  # np.append looses Measurement from dtype
 
 # forget_past deletes measurements with .Tstart ≤ Tcut
@@ -528,6 +590,71 @@ def _success_rate(calc, fini, init): # -> Interval in [0,1]
     return Interval(a,b)
 
 
+# eutran_ip_throughput computes "E-UTRAN IP Throughput" KPI.
+#
+# It returns the following:
+#
+#   - IPThp[QCI][dl,ul]         IP throughput per QCI for downlink and uplink   (bit/s)
+#
+# All elements are returned as Intervals with information about confidence for
+# computed values.
+#
+# NOTE: the unit of the result is bit/s, not kbit/s.
+#
+# 3GPP reference: TS 32.450 6.3.1 "E-UTRAN IP Throughput".
+@func(Calc)
+def eutran_ip_throughput(calc): # -> IPThp[QCI][dl,ul]
+    qdlΣv  = np.zeros(nqci, dtype=np.float64)
+    qdlΣt  = np.zeros(nqci, dtype=np.float64)
+    qdlΣte = np.zeros(nqci, dtype=np.float64)
+    qulΣv  = np.zeros(nqci, dtype=np.float64)
+    qulΣt  = np.zeros(nqci, dtype=np.float64)
+    qulΣte = np.zeros(nqci, dtype=np.float64)
+
+    for m in calc._miter():
+        τ = m['X.δT']
+
+        for qci in range(nqci):
+            dl_vol      = m["DRB.IPVolDl.QCI"]          [qci]
+            dl_time     = m["DRB.IPTimeDl.QCI"]         [qci]
+            dl_time_err = m["XXX.DRB.IPTimeDl_err.QCI"] [qci]
+            ul_vol      = m["DRB.IPVolUl.QCI"]          [qci]
+            ul_time     = m["DRB.IPTimeUl.QCI"]         [qci]
+            ul_time_err = m["XXX.DRB.IPTimeUl_err.QCI"] [qci]
+
+            if isNA(dl_vol) or isNA(dl_time) or isNA(dl_time_err):
+                # don't account uncertainty - here it is harder to do compared
+                # to erab_accessibility and the benefit is not clear. Follow
+                # plain 3GPP spec for now.
+                pass
+            else:
+                qdlΣv[qci]  += dl_vol
+                qdlΣt[qci]  += dl_time
+                qdlΣte[qci] += dl_time_err
+
+            if isNA(ul_vol) or isNA(ul_time) or isNA(ul_time_err):
+                # no uncertainty accounting - see ^^^
+                pass
+            else:
+                qulΣv[qci]  += ul_vol
+                qulΣt[qci]  += ul_time
+                qulΣte[qci] += ul_time_err
+
+    thp = np.zeros(nqci, dtype=np.dtype([
+                            ('dl', Interval._dtype),
+                            ('ul', Interval._dtype),
+    ]))
+    for qci in range(nqci):
+        if qdlΣt[qci] > 0:
+            thp[qci]['dl']['lo'] = qdlΣv[qci] / (qdlΣt[qci] + qdlΣte[qci])
+            thp[qci]['dl']['hi'] = qdlΣv[qci] / (qdlΣt[qci] - qdlΣte[qci])
+        if qulΣt[qci] > 0:
+            thp[qci]['ul']['lo'] = qulΣv[qci] / (qulΣt[qci] + qulΣte[qci])
+            thp[qci]['ul']['hi'] = qulΣv[qci] / (qulΣt[qci] - qulΣte[qci])
+
+    return thp
+
+
 # _miter iterates through [.τ_lo, .τ_hi) yielding Measurements.
 #
 # The measurements are yielded with consecutive timestamps. There is no gaps
@@ -602,7 +729,7 @@ def _Σx(m: Measurement, name_x: str, _all_x: func):
     if not isNA(s):
         return s
     s  = s.dtype.type(0)
-    ok = True
+    ok = True  if len(name_xv) > 0  else False
     for _ in name_xv:
         v = m[_]
         # we don't know the answer even if single value is NA
@@ -627,6 +754,7 @@ def _newscalar(typ, dtype):
     _ = np.zeros(shape=(), dtype=(typ, dtype))
     s = _[()]
     assert type(s) is typ
+    assert s.dtype == dtype
     return s
 
 
@@ -634,18 +762,24 @@ def _newscalar(typ, dtype):
 
 # NA returns "Not Available" value for dtype.
 def NA(dtype):
+    typ = dtype.type
     # float
-    if issubclass(dtype.type, np.floating):
-        return np.nan
+    if issubclass(typ, np.floating):
+        na = np.nan
     # int: NA is min value
-    if issubclass(dtype.type, np.signedinteger):
-        return np.iinfo(dtype.type).min
+    elif issubclass(typ, np.signedinteger):
+        na = np.iinfo(typ).min
 
-    raise AssertionError("NA not defined for dtype %s" % (dtype,))
+    else:
+        raise AssertionError("NA not defined for dtype %s" % (dtype,))
+
+    return typ(na)  # return the same type as dtype has, e.g. np.int32, not int
 
 
 # isNA returns whether value represent NA.
-# value must be numpy scalar.
+#
+# returns True/False if value is scalar.
+# returns array(True/False) if value is array.
 def isNA(value):
     na = NA(value.dtype)
     if np.isnan(na):

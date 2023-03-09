@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -45,21 +45,23 @@ class ConnClosedError(ConnError):
 
 
 # connect connects to a service via WebSocket.
-def connect(wsuri):  # -> Conn
+def connect(ctx, wsuri):  # -> Conn
     #websocket.enableTrace(True)     # TODO on $XLTE_AMARI_WS_DEBUG=y ?
     ws = websocket.WebSocket()
     ws.settimeout(5)  # reasonable default
     try:
+        # FIXME handle ctx cancel  (but it won't stuck forever due to ._ws own timeout)
         ws.connect(wsuri)
     except Exception as ex:
         raise ConnError("connect") from ex
-    return Conn(ws)
+    return Conn(ws, wsuri)
 
 # Conn represents WebSocket connection to a service.
 #
 # It provides functionality to issue requests, and (TODO) to receive notifications.
 # Conn should be created via connect.
 class Conn:
+    # .wsuri            websocket uri of the service
     # ._ws              websocket connection to service
     # ._srv_ready_msg   message we got for "ready"
 
@@ -71,7 +73,7 @@ class Conn:
     # ._rx_wg           sync.WorkGroup for spawned _serve_recv
     # ._down_once       sync.Once
 
-    def __init__(conn, ws):
+    def __init__(conn, ws, wsuri):
         try:
             msg0_raw = ws.recv()
             msg0 = json.loads(msg0_raw)
@@ -82,6 +84,7 @@ class Conn:
             ws.close()
             raise ConnError("handshake") from ex
 
+        conn.wsuri = wsuri
         conn._ws = ws
         conn._srv_ready_msg = msg0
 
@@ -167,13 +170,13 @@ class Conn:
 
 
     # req sends request and waits for response.
-    def req(conn, msg, args_dict):   # -> response
-        rx, _ = conn.req_(msg, args_dict)
+    def req(conn, ctx, msg, args_dict):   # -> response
+        rx, _ = conn.req_(ctx, msg, args_dict)
         return rx
 
     @func
-    def req_(conn, msg, args_dict):  # -> response, raw_response
-        rxq = conn._send_msg(msg, args_dict)
+    def req_(conn, ctx, msg, args_dict):  # -> response, raw_response
+        rxq = conn._send_msg(ctx, msg, args_dict)
 
         # handle rx timeout ourselves. We cannot rely on global rx timeout
         # since e.g. other replies might be coming in again and again.
@@ -185,10 +188,13 @@ class Conn:
             rxt = _.c
 
         _, _rx = select(
-            rxt.recv,       # 0
-            rxq.recv_,      # 1
+            ctx.done().recv,    # 0
+            rxt.recv,           # 1
+            rxq.recv_,          # 2
         )
         if _ == 0:
+            raise ctx.err()
+        if _ == 1:
             raise websocket.WebSocketTimeoutException("timed out waiting for response")
 
         _, ok = _rx
@@ -201,7 +207,7 @@ class Conn:
 
 
     # _send_msg sends message to the service.
-    def _send_msg(conn, msg, args_dict): # -> rxq
+    def _send_msg(conn, ctx, msg, args_dict): # -> rxq
         assert isinstance(args_dict, dict)
         assert 'message'    not in args_dict
         assert 'message_id' not in args_dict
@@ -217,6 +223,7 @@ class Conn:
         d.update(args_dict)
         jmsg = json.dumps(d)
         try:
+            # FIXME handle ctx cancel  (but it won't stuck forever due to ._ws own timeout)
             conn._ws.send(jmsg)
         except Exception as ex:
             raise ConnError("send") from ex

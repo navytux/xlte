@@ -11,7 +11,8 @@ from golang import func, defer
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from datetime import datetime
+from matplotlib import ticker
+from datetime import datetime, timedelta
 
 import sys
 from urllib.request import urlopen
@@ -45,37 +46,58 @@ def main():
     # The data, as contained in the measurement log, is kept there in the form
     # of kpi.Measurement, which is driver-independent representation for
     # KPI-related measurement data.
-    mlog = kpi.MeasurementLog()
-    while 1:
-        m = alogm.read()
-        if m is None:
-            break
-        mlog.append(m)
+
+    def load_measurements(alogm: akpi.LogMeasure) -> kpi.MeasurementLog:
+        mlog = kpi.MeasurementLog()
+        while 1:
+            m = alogm.read()
+            if m is None:
+                break
+            mlog.append(m)
+        return mlog
+
+    mlog = load_measurements(alogm)
 
 
-    # Step 3. Compute E-RAB Accessibility KPI over MeasurementLog with
-    # specified granularity period. We partition entries in the measurement log
-    # by specified time period, and further use kpi.Calc to compute the KPI
-    # over each period.
+    # Step 3. Compute KPIs over MeasurementLog with specified granularity
+    # period. We partition entries in the measurement log by specified time
+    # period, and further use kpi.Calc to compute the KPIs over each period.
+
+    # calc_each_period partitions mlog data into periods and yields kpi.Calc for each period.
+    def calc_each_period(mlog: kpi.MeasurementLog, tperiod: float): # -> yield kpi.Calc
+        τ = mlog.data()[0]['X.Tstart']
+        for m in mlog.data()[1:]:
+            τ_ = m['X.Tstart']
+            if (τ_ - τ) >= tperiod:
+                calc = kpi.Calc(mlog, τ, τ+tperiod)
+                τ = calc.τ_hi
+                yield calc
+
     tperiod = float(sys.argv[1])
     vτ = []
     vInititialEPSBEstabSR = []
     vAddedEPSBEstabSR     = []
+    vIPThp_qci            = []
 
-    τ = mlog.data()[0]['X.Tstart']
-    for m in mlog.data()[1:]:
-        τ_ = m['X.Tstart']
-        if (τ_ - τ) >= tperiod:
-            calc = kpi.Calc(mlog, τ, τ+tperiod)
-            vτ.append(calc.τ_lo)
-            τ = calc.τ_hi
-            _ = calc.erab_accessibility()
-            vInititialEPSBEstabSR.append(_[0])
-            vAddedEPSBEstabSR    .append(_[1])
+    for calc in calc_each_period(mlog, tperiod):
+        vτ.append(calc.τ_lo)
+
+        _ = calc.erab_accessibility()       # E-RAB Accessibility
+        vInititialEPSBEstabSR.append(_[0])
+        vAddedEPSBEstabSR    .append(_[1])
+
+        _ = calc.eutran_ip_throughput()     # E-UTRAN IP Throughput
+        vIPThp_qci.append(_)
+
+    vτ                      = np.asarray([datetime.fromtimestamp(_) for _ in vτ])
+    vInititialEPSBEstabSR   = np.asarray(vInititialEPSBEstabSR)
+    vAddedEPSBEstabSR       = np.asarray(vAddedEPSBEstabSR)
+    vIPThp_qci              = np.asarray(vIPThp_qci)
 
 
-    # Step 4. Plot computed KPI.
-    # The E-RAB Accessibility KPI has two parts: initial E-RAB establishment
+    # Step 4. Plot computed KPIs.
+
+    # 4a) The E-RAB Accessibility KPI has two parts: initial E-RAB establishment
     # success rate, and additional E-RAB establishment success rate. kpi.Calc
     # provides both of them in the form of their confidence intervals. The
     # lower margin of the confidence interval coincides with 3GPP definition of
@@ -94,37 +116,124 @@ def main():
     #
     # For each of the parts we plot both its lower margin and the whole
     # confidence interval area.
-    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, layout='constrained')
-    pmin, psec = divmod(tperiod, 60)
-    fig.suptitle("E-RAB Accessibility / %s%s" % ("%d'" % pmin if pmin else '',
-                                                 '%d"' % psec if psec else ''))
+
+    # 4b) The E-UTRAN IP Throughput KPI provides throughput measurements for
+    # all QCIs and does not have uncertainty. QCIs for which throughput data is
+    # all zeros are said to be silent and are not plotted.
+
+    fig = plt.figure(constrained_layout=True, figsize=(12,8))
+    facc, fthp = fig.subfigures(1, 2)
+    figplot_erab_accessibility  (facc, vτ, vInititialEPSBEstabSR, vAddedEPSBEstabSR, tperiod)
+    figplot_eutran_ip_throughput(fthp, vτ, vIPThp_qci, tperiod)
+    plt.show()
+
+
+# ---- plotting routines ----
+
+# figplot_erab_accessibility plots E-RAB Accessibility KPI data on the figure.
+def figplot_erab_accessibility(fig: plt.Figure, vτ, vInititialEPSBEstabSR, vAddedEPSBEstabSR, tperiod=None):
+    ax1, ax2 = fig.subplots(2, 1, sharex=True)
+    fig.suptitle("E-RAB Accessibility / %s" % (tpretty(tperiod)  if tperiod is not None else
+                                               vτ_period_pretty(vτ)))
     ax1.set_title("Initial E-RAB establishment success rate")
     ax2.set_title("Added E-RAB establishment success rate")
 
-    vτ = [datetime.fromtimestamp(_) for _ in vτ]
-    def plot1(ax, v, label):  # plot1 plots KPI data from vector v on ax.
-        v = np.asarray(v)
-        ax.plot(vτ, v['lo'], drawstyle='steps-post', label=label)
-        ax.fill_between(vτ, v['lo'], v['hi'],
-                        step='post', alpha=0.1, label='%s\nuncertainty' % label)
+    plot_success_rate(ax1, vτ, vInititialEPSBEstabSR, "InititialEPSBEstabSR")
+    plot_success_rate(ax2, vτ, vAddedEPSBEstabSR,     "AddedEPSBEstabSR")
 
-    plot1(ax1, vInititialEPSBEstabSR, "InititialEPSBEstabSR")
-    plot1(ax2, vAddedEPSBEstabSR,     "AddedEPSBEstabSR")
 
-    for ax in (ax1, ax2):
-        ax.set_ylabel("%")
-        ax.set_ylim([0-10, 100+10])
-        ax.set_yticks([0,20,40,60,80,100])
+# figplot_eutran_ip_throughput plots E-UTRAN IP Throughput KPI data on the figure.
+def figplot_eutran_ip_throughput(fig: plt.Figure, vτ, vIPThp_qci, tperiod=None):
+    ax1, ax2 = fig.subplots(2, 1, sharex=True)
+    fig.suptitle("E-UTRAN IP Throughput / %s" % (tpretty(tperiod)  if tperiod is not None else
+                                                 vτ_period_pretty(vτ)))
+    ax1.set_title("Downlink")
+    ax2.set_title("Uplink")
+    ax1.set_ylabel("Mbit/s")
+    ax2.set_ylabel("Mbit/s")
 
-        xloc = mdates.AutoDateLocator()
-        xfmt = mdates.ConciseDateFormatter(xloc)
-        ax.xaxis.set_major_locator(xloc)
-        ax.xaxis.set_major_formatter(xfmt)
+    v_qci = (vIPThp_qci .view(np.float64) / 1e6) \
+                        .view(vIPThp_qci.dtype)
+    plot_per_qci(ax1, vτ, v_qci[:,:]['dl'], 'IPThp')
+    plot_per_qci(ax2, vτ, v_qci[:,:]['ul'], 'IPThp')
 
-        ax.grid(True)
-        ax.legend(loc='upper left')
+    _, dmax = ax1.get_ylim()
+    _, umax = ax2.get_ylim()
+    ax1.set_ylim(ymin=0, ymax=dmax*1.05)
+    ax2.set_ylim(ymin=0, ymax=umax*1.05)
 
-    plt.show()
+
+# plot_success_rate plots success-rate data from vector v on ax.
+# v is array with Intervals.
+def plot_success_rate(ax, vτ, v, label):
+    ax.plot(vτ, v['lo'], drawstyle='steps-post', label=label)
+    ax.fill_between(vτ, v['lo'], v['hi'],
+                    step='post', alpha=0.1, label='%s\nuncertainty' % label)
+
+    ax.set_ylabel("%")
+    ax.set_ylim([0-10, 100+10])
+    ax.set_yticks([0,20,40,60,80,100])
+
+    fmt_dates_pretty(ax.xaxis)
+    ax.grid(True)
+    ax.legend(loc='upper left')
+
+
+# plot_per_qci plots data from per-QCI vector v_qci.
+#
+# v_qci should be array[t, QCI].
+# QCIs, for which v[:,qci] is all zeros, are said to be silent and are not plotted.
+def plot_per_qci(ax, vτ, v_qci, label):
+    ax.set_xlim((vτ[0], vτ[-1]))  # to have correct x range even if we have no data
+    assert len(v_qci.shape) == 2
+    silent = True
+    propv = list(plt.rcParams['axes.prop_cycle'])
+    for qci in range(v_qci.shape[1]):
+        v = v_qci[:, qci]
+        if (v['hi'] == 0).all():  # skip silent QCIs
+            continue
+        silent = False
+        prop = propv[qci % len(propv)]  # to have same colors for same qci in different graphs
+        ax.plot(vτ, v['lo'], label="%s.%d" % (label, qci), **prop)
+        ax.fill_between(vτ, v['lo'], v['hi'], alpha=0.3, **prop)
+
+    if silent:
+        ax.plot([],[], ' ', label="all QCI silent")
+
+    fmt_dates_pretty(ax.xaxis)
+    ax.grid(True)
+    ax.legend(loc='upper left')
+
+
+# fmt_dates_pretty instructs axis to use concise dates formatting.
+def fmt_dates_pretty(axis):
+    xloc = mdates.AutoDateLocator()
+    xfmt = mdates.ConciseDateFormatter(xloc)
+    axis.set_major_locator(xloc)
+    axis.set_major_formatter(xfmt)
+    axis.set_minor_locator(ticker.AutoMinorLocator(5))
+
+
+# tpretty returns pretty form for time, e.g. 1'2" for 62 seconds.
+def tpretty(t):
+    tmin, tsec = divmod(t, 60)
+    return "%s%s" % ("%d'" % tmin if tmin else '',
+                     '%d"' % tsec if tsec else '')
+
+# vτ_period_pretty returns pretty form for time period in vector vτ.
+# for example [2,5,8,11] gives 3'.
+def vτ_period_pretty(vτ):
+    if len(vτ) < 2:
+        return "?"
+    s = timedelta(seconds=1)
+    δvτ = (vτ[1:] - vτ[:-1]) / s  # in seconds
+    min = δvτ.min()
+    avg = δvτ.mean()
+    max = δvτ.max()
+    std = δvτ.std()
+    if min == max:
+        return tpretty(min)
+    return "%s ±%s  [%s, %s]" % (tpretty(avg), tpretty(std), tpretty(min), tpretty(max))
 
 
 if __name__ == '__main__':

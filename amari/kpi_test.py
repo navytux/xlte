@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -19,9 +19,9 @@
 # See https://www.nexedi.com/licensing for rationale and options.
 
 from xlte.amari.kpi import LogMeasure, LogError, _trace as trace
-from xlte.kpi import Measurement
+from xlte.kpi import Measurement, isNA
 from golang import func, defer, b
-import io, json
+import io, json, re
 
 from pytest import raises
 
@@ -61,6 +61,7 @@ class tLogMeasure:
 
     # xlog appends one line to enb.xlog.
     def xlog(t, line):
+        trace('xlog += %s' % line)
         line = b(line)
         assert b'\n' not in line
         pos = t._fxlog.tell()
@@ -71,7 +72,7 @@ class tLogMeasure:
     # _mok_init reinitializes ._mok with Measurement defaults.
     def _mok_init(t):
         t._mok = Measurement()
-        # init fields handled by amari.kpi to 0
+        # init fields extracted by amari.kpi from stats to 0
         # this will be default values to verify against
         for field in (
             'RRC.ConnEstabAtt.sum',
@@ -90,6 +91,24 @@ class tLogMeasure:
     def expect1(t, field, vok):
         if t._mok is None:
             t._mok_init()
+
+        # if a particular X.QCI[qci] is expected - default all other qcis to 0
+        _ = re.match(r"^(.*)\.([0-9]+)$", field)
+        if _ is not None:
+            farr = "%s.QCI" % _.group(1)
+            if isNA(t._mok[farr]).all():
+                t._mok[farr][:] = 0
+
+            # also automatically initialize XXX.DRB.IPTimeX_err to 0.01 upon seeing DRB.IPTimeX
+            # ( in tests we use precise values for tx_time and tx_time_notailtti
+            #   with δ=0.02 - see drb_trx and jdrb_stats)
+            n = _.group(1)
+            if n.startswith('DRB.IPTime'):
+                ferr = "XXX.%s_err" % n
+                if isNA(t._mok[ferr+'.QCI']).all():
+                    t._mok[ferr+'.QCI'][:] = 0
+                t._mok["%s.%s" % (ferr, _.group(2))] = ((vok + 0.01) - (vok - 0.01)) / 2  # ≈ 0.01
+
         t._mok[field] = vok
 
     # expect_nodata requests to verify all fields besides timestamp-related to be NA.
@@ -121,24 +140,12 @@ def test_LogMeasure():
     _ = t.expect1
 
     # empty stats after first attach
-    t.xlog( jstats(0.7, {}) )
+    t.xlog( jstats(1, {}) )
     _('X.Tstart',                   0.02)
-    _('X.δT',                       0.7-0.02)
+    _('X.δT',                       1-0.02)
     t.expect_nodata()
-    t.read()
+    # note: no t.read() - see tstats
 
-    # further empty stats
-    t.xlog( jstats(1.0, {}) )
-    _('X.Tstart',                   0.7)
-    _('X.δT',                       1-0.7)
-    _('RRC.ConnEstabAtt.sum',       0)
-    _('RRC.ConnEstabSucc.sum',      0)
-    _('S1SIG.ConnEstabAtt',         0)
-    _('S1SIG.ConnEstabSucc',        0)
-    _('ERAB.EstabInitAttNbr.sum',   0)
-    _('ERAB.EstabInitSuccNbr.sum',  0)
-    _('ERAB.EstabAddAttNbr.sum',    0)
-    _('ERAB.EstabAddSuccNbr.sum',   0)
 
     # tstats is the verb to check handling of stats message.
     #
@@ -193,6 +200,33 @@ def test_LogMeasure():
         τ_xlog += 1
         τ_logm += 1
         counters_prev = {} # reset
+
+    # tdrb_stats is the verb to verify handling of x.drb_stats message.
+    #
+    # it xlogs drb stats with given δτ relative to either previous (δτ > 0) or
+    # next (δτ < 0) stats or event.
+    def tdrb_stats(δτ, qci_trx):
+        if δτ >= 0:
+            τ = τ_xlog   + δτ   # after previous stats or event
+        else:
+            τ = τ_xlog+1 + δτ   # before next stats or event
+        trace('\n>>> tdrb_stats τ: %s  τ_xlog: %s  τ_logm: %s' % (τ, τ_xlog, τ_logm))
+        t.xlog( jdrb_stats(τ, qci_trx) )
+
+
+
+    # further empty stats
+    tstats({})
+    _('X.Tstart',                   1)
+    _('X.δT',                       1)
+    _('RRC.ConnEstabAtt.sum',       0)
+    _('RRC.ConnEstabSucc.sum',      0)
+    _('S1SIG.ConnEstabAtt',         0)
+    _('S1SIG.ConnEstabSucc',        0)
+    _('ERAB.EstabInitAttNbr.sum',   0)
+    _('ERAB.EstabInitSuccNbr.sum',  0)
+    _('ERAB.EstabAddAttNbr.sum',    0)
+    _('ERAB.EstabAddSuccNbr.sum',   0)
 
 
     # RRC.ConnEstab
@@ -260,6 +294,70 @@ def test_LogMeasure():
              's1_erab_setup_response':      +2})
     _('ERAB.EstabAddAttNbr.sum',    3)
     _('ERAB.EstabAddSuccNbr.sum',   2)
+
+
+    # DRB.IPVol / DRB.IPTime  (testing all variants of stats/x.drb_stats interaction)
+    tδstats({})
+    tδstats({})                                             # ──S₁·d₁─────S₂·d₂─────S₃·d₃──
+    tdrb_stats(+0.1, {1:  drb_trx(1.1,10,   1.2,20),
+                      11: drb_trx(1.3,30,   1.4,40)})
+    # nothing here - d₁ comes as the first drb_stats
+    tδstats({})                                             # S₂
+    tdrb_stats(+0.1, {2:  drb_trx(2.1,100,  2.2,200),       # d₂ is included into S₁-S₂
+                      22: drb_trx(2.3,300,  2.4,400)})
+    _('DRB.IPTimeDl.2',  2.1);  _('DRB.IPVolDl.2',  8*100)
+    _('DRB.IPTimeUl.2',  2.2);  _('DRB.IPVolUl.2',  8*200)
+    _('DRB.IPTimeDl.22', 2.3);  _('DRB.IPVolDl.22', 8*300)
+    _('DRB.IPTimeUl.22', 2.4);  _('DRB.IPVolUl.22', 8*400)
+
+    tδstats({})                                             # S₃
+    tdrb_stats(+0.1, {3:  drb_trx(3.1,1000, 3.2,2000),      # d₃ is included int S₂-S₃
+                      33: drb_trx(3.3,3000, 3.4,4000)})
+    _('DRB.IPTimeDl.3',  3.1);  _('DRB.IPVolDl.3',  8*1000)
+    _('DRB.IPTimeUl.3',  3.2);  _('DRB.IPVolUl.3',  8*2000)
+    _('DRB.IPTimeDl.33', 3.3);  _('DRB.IPVolDl.33', 8*3000)
+    _('DRB.IPTimeUl.33', 3.4);  _('DRB.IPVolUl.33', 8*4000)
+
+
+    tdrb_stats(-0.1, {1: drb_trx(1.1,11,    1.2,12)})       # ──S·d─────d·S─────d·S──
+    tδstats({})                                             #       cont↑
+    _('DRB.IPTimeDl.1',  1.1);  _('DRB.IPVolDl.1',  8*11)
+    _('DRB.IPTimeUl.1',  1.2);  _('DRB.IPVolUl.1',  8*12)
+    tdrb_stats(-0.1, {2: drb_trx(2.1,21,    2.2,22)})
+    tδstats({})
+    _('DRB.IPTimeDl.2',  2.1);  _('DRB.IPVolDl.2',  8*21)
+    _('DRB.IPTimeUl.2',  2.2);  _('DRB.IPVolUl.2',  8*22)
+
+    tdrb_stats(-0.1, {3: drb_trx(3.1,31,    3.2,32)})       # ──d·S─────d·S─────d·S·d──
+    tδstats({})                                             #       cont↑
+    _('DRB.IPTimeDl.3',  3.1);  _('DRB.IPVolDl.3',  8*31)
+    _('DRB.IPTimeUl.3',  3.2);  _('DRB.IPVolUl.3',  8*32)
+    tdrb_stats(-0.1, {4: drb_trx(4.1,41,    4.2,42)})
+    tδstats({})
+    tdrb_stats(+0.1, {5: drb_trx(5.1,51,    5.2,52)})
+    _('DRB.IPTimeDl.4',  4.1);  _('DRB.IPVolDl.4',  8*41)
+    _('DRB.IPTimeUl.4',  4.2);  _('DRB.IPVolUl.4',  8*42)
+    _('DRB.IPTimeDl.5',  5.1);  _('DRB.IPVolDl.5',  8*51)
+    _('DRB.IPTimeUl.5',  5.2);  _('DRB.IPVolUl.5',  8*52)
+
+    tdrb_stats(+0.5, {6: drb_trx(6.1,61,    6.2,62)})       # ──d·S·d──d──S───d──S──
+    tδstats({})                                             #      cont↑
+    _('DRB.IPTimeDl.6',  6.1);  _('DRB.IPVolDl.6',  8*61)
+    _('DRB.IPTimeUl.6',  6.2);  _('DRB.IPVolUl.6',  8*62)
+    tdrb_stats(+0.51,{7: drb_trx(7.1,71,    7.2,72)})
+    tδstats({})
+    _('DRB.IPTimeDl.7',  7.1);  _('DRB.IPVolDl.7',  8*71)
+    _('DRB.IPTimeUl.7',  7.2);  _('DRB.IPVolUl.7',  8*72)
+
+    tdrb_stats(-0.1, {8: drb_trx(8.1,81,    8.2,82)})       # combined d + S with nonzero counters
+    tδstats({'s1_initial_context_setup_request':    +3,     # d──S────d·S──
+             's1_initial_context_setup_response':   +2})    #     cont↑
+    _('DRB.IPTimeDl.8',  8.1);  _('DRB.IPVolDl.8',  8*81)
+    _('DRB.IPTimeUl.8',  8.2);  _('DRB.IPVolUl.8',  8*82)
+    _('S1SIG.ConnEstabAtt',         3)
+    _('S1SIG.ConnEstabSucc',        2)
+    _('ERAB.EstabInitAttNbr.sum',   3) # currently same as S1SIG.ConnEstab
+    _('ERAB.EstabInitSuccNbr.sum',  2) # ----//----
 
 
     # service detach/attach, connect failure, xlog failure
@@ -373,17 +471,25 @@ def test_LogMeasure_badinput():
                     "  but only single-cell configurations are supported"):
             t.read()
     tbadcell(11, 0)
+    read_nodata(11, 1)
     tbadcell(12, 0)
+    read_nodata(12, 1)
     tbadcell(13, 2)
+    read_nodata(13, 1)
     tbadcell(14, 3)
 
     def tbadstats(τ, error):
         with raises(LogError, match="t%s: stats: %s" % (τ, error)):
             t.read()
+    read_nodata(14, 7)
     tbadstats(21, ":10/cells/1 no `counters`")
+    read_nodata(21, 1)
     tbadstats(22, ":11/cells/1/counters no `messages`")
+    read_nodata(22, 1)
     tbadstats(23, ":12/ no `counters`")
+    read_nodata(23, 1)
     tbadstats(24, ":13/counters no `messages`")
+    read_nodata(24, 7)
 
     readok(31, 5)           # 31-32
     def tbadline():
@@ -409,23 +515,24 @@ def test_LogMeasure_cc_wraparound():
     t.xlog( jstats(1, {}) )
     t.xlog( jstats(2, {cc: 13}) )
     t.xlog( jstats(3, {cc: 12}) )   # cc↓   - should be reported
-    t.xlog( jstats(4, {cc: 140}) )  # cc↑↑  - should should start afresh
+    t.xlog( jstats(4, {cc: 140}) )  # cc↑↑  - should start afresh
     t.xlog( jstats(5, {cc: 150}) )
 
     def readok(τ, CC_value):
         _('X.Tstart',   τ)
-        _('X.δT',       1)
-        _(CC,           CC_value)
+        _('X.δT',       int(τ+1)-τ)
+        if CC_value is not None:
+            _(CC,       CC_value)
+        else:
+            t.expect_nodata()
         t.read()
 
-    _('X.Tstart',   0.02)   # attach-1
-    _('X.δT',       0.98)
-    t.expect_nodata()
-    t.read()
-
+    readok(0.02, None)      # attach-1
     readok(1, 13)           # 1-2
+    readok(2, None)         # 2-3  M(ø)
     with raises(LogError, match=r"t3: cc %s↓  \(13 → 12\)" % cc):
-        t.read()            # 2-3
+        t.read()            # 2-3  raise
+    readok(3, None)         # 3-4  M(ø)
     readok(4, 10)           # 4-5
 
 
@@ -454,6 +561,52 @@ def test_jstats():
     assert jstats(0, {}) == '{"message": "stats", "utc": 0, "cells": {"1": {"counters": {"messages": {}}}}, "counters": {"messages": {}}}'
     assert jstats(123.4, {"rrc_x": 1, "s1_y": 2, "rrc_z": 3, "x2_zz": 4}) == \
             '{"message": "stats", "utc": 123.4, "cells": {"1": {"counters": {"messages": {"rrc_x": 1, "rrc_z": 3}}}}, "counters": {"messages": {"s1_y": 2, "x2_zz": 4}}}'
+
+
+# jdrb_stats, similarly to jstats, returns json-encoded x.drb_stats message
+# corresponding to per-QCI dl/ul tx_time/tx_bytes.
+def jdrb_stats(τ, qci_dlul):  # -> str
+    qci_dlul = qci_dlul.copy()
+    for qci, dlul in qci_dlul.items():
+        assert isinstance(dlul, dict)
+        assert set(dlul.keys()) == {"dl_tx_bytes", "dl_tx_time", "dl_tx_time_notailtti",
+                                    "ul_tx_bytes", "ul_tx_time", "ul_tx_time_notailtti"}
+        dlul["dl_tx_time_err"] = 0              # original time is simulated to be
+        dlul["ul_tx_time_err"] = 0              # measured precisely in tess.
+        dlul["dl_tx_time_notailtti_err"] = 0    # ----//----
+        dlul["ul_tx_time_notailtti_err"] = 0    #
+
+    s = {
+        "message":  "x.drb_stats",
+        "utc":      τ,
+        "qci_dict": qci_dlul,
+    }
+
+    return json.dumps(s)
+
+def test_jdrb_stats():
+    # NOTE json encodes 5 and 9 keys are strings, not integers
+    x = 0.01
+    assert jdrb_stats(100, {5: drb_trx(0.1,1234, 0.2,4321),
+                            9: drb_trx(1.1,7777, 1.2,8888)}) == ( \
+        '{"message": "x.drb_stats", "utc": 100, "qci_dict":' + \
+        ' {"5": {"dl_tx_bytes": 1234, "dl_tx_time": %(0.1+x)s, "dl_tx_time_notailtti": %(0.1-x)s,' + \
+        ' "ul_tx_bytes": 4321, "ul_tx_time": %(0.2+x)s, "ul_tx_time_notailtti": %(0.2-x)s,' + \
+        ' "dl_tx_time_err": 0, "ul_tx_time_err": 0, "dl_tx_time_notailtti_err": 0, "ul_tx_time_notailtti_err": 0},' + \
+        ' "9": {"dl_tx_bytes": 7777, "dl_tx_time": 1.11, "dl_tx_time_notailtti": 1.09,' + \
+        ' "ul_tx_bytes": 8888, "ul_tx_time": 1.21, "ul_tx_time_notailtti": 1.19,' + \
+        ' "dl_tx_time_err": 0, "ul_tx_time_err": 0, "dl_tx_time_notailtti_err": 0, "ul_tx_time_notailtti_err": 0}' + \
+        '}}') % {
+            '0.1-x': 0.1-x, '0.1+x': 0.1+x,  # working-around float impreciseness
+            '0.2-x': 0.2-x, '0.2+x': 0.2+x,
+        }
+
+
+# drb_trx returns dict describing dl/ul transmissions of a data radio bearer.
+# such dict is used as per-QCI entry in x.drb_stats
+def drb_trx(dl_tx_time, dl_tx_bytes, ul_tx_time, ul_tx_bytes):
+    return {"dl_tx_bytes": dl_tx_bytes, "dl_tx_time": dl_tx_time + 0.01, "dl_tx_time_notailtti": dl_tx_time - 0.01,
+            "ul_tx_bytes": ul_tx_bytes, "ul_tx_time": ul_tx_time + 0.01, "ul_tx_time_notailtti": ul_tx_time - 0.01}
 
 
 # ionone returns empty data source.
