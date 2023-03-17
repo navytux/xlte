@@ -131,17 +131,26 @@ class LogSpec:
 def xlog(ctx, wsuri, logspecv):
     # make sure we always have meta.sync - either the caller specifies it
     # explicitly, or we add it automatically to come first with default
-    # 10x·longest periodicity.
+    # 10x·longest periodicity. Do the same about config_get - by default we
+    # want it to be present after every sync.
     lsync       = None
+    isync       = None
+    lconfig_get = None
     pmax = 1
     for (i,l) in enumerate(logspecv):
         pmax = max(pmax, l.period)
         if l.query == "meta.sync":
+            isync = i
             lsync = l
+        if l.query == "config_get":
+            lconfig_get = l
     logspecv = logspecv[:]  # keep caller's intact
     if lsync is None:
+        isync = 0
         lsync = LogSpec("meta.sync", [], pmax*10)
         logspecv.insert(0, lsync)
+    if lconfig_get is None:
+        logspecv.insert(isync+1, LogSpec("config_get", [], lsync.period))
 
 
     xl = _XLogger(wsuri, logspecv, lsync.period)
@@ -262,10 +271,6 @@ class _XLogger:
             else:
                 _, resp_raw = conn.req_(ctx, query, opts)
             return resp_raw
-
-        # emit config_get after attach
-        cfg_raw = req_(ctx, 'config_get', {})
-        xl.emit(cfg_raw)
 
         # loop emitting requested logspecs
         t0 = time.now()
