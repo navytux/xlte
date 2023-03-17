@@ -79,6 +79,11 @@ class LogSpec:
 
     DEFAULT_PERIOD = 60
 
+    def __init__(spec, query, optv, period):
+        spec.query  = query
+        spec.optv   = optv
+        spec.period = period
+
     def __str__(spec):
         return "%s[%s]/%ss" % (spec.query, ','.join(spec.optv), spec.period)
 
@@ -116,11 +121,7 @@ class LogSpec:
             if c in query:
                 bad("invalid query")
 
-        spec = LogSpec()
-        spec.query  = query
-        spec.optv   = optv
-        spec.period = period
-        return spec
+        return LogSpec(query, optv, period)
 
 
 # xlog queries service @wsuri periodically according to queries specified by
