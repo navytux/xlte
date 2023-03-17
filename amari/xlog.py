@@ -145,7 +145,12 @@ def xlog(ctx, wsuri, logspecv):
                     # e.g. disk full in xl.jemit itself
                     log.exception('xlog failure (second level):')
 
-        time.sleep(3)
+        _, _rx = select(
+            ctx.done().recv,        # 0
+            time.after(3).recv,     # 1
+        )
+        if _ == 0:
+            raise ctx.err()
 
 # _XLogger serves xlog implementation.
 class _XLogger:
