@@ -21,6 +21,7 @@
 from xlte.amari import xlog
 from golang import func, defer, b
 import io
+import json
 
 from pytest import raises
 
@@ -170,6 +171,130 @@ def test_Reader_readahead_vs_eof():
     expect_msg(5, "eee")
     _ = xr.read()
     assert _ is None
+
+
+# verify that for xlog stream produced by enb < 2022-12-01 the Reader can build
+# Messages timestamps by itself based on sync.
+@func
+def test_Reader_timestamp_from_sync_wo_utc():
+    def jevent(time, event, args_dict={}):
+        d = {
+            "event":     event,
+            "time" :     time,
+        }
+        d.update(args_dict)
+        return json.dumps({"meta": d})
+
+    def jsync(time, srv_time):
+        d = {
+            "state":     "attached"  if srv_time is not None  else "detached",
+            "reason":    "periodic",
+            "generator": "...",
+        }
+        if srv_time is not None:
+            d['srv_time'] = srv_time
+        return jevent(time, "sync", d)
+
+    assert jsync(1.1, 2.2)  == '{"meta": {"event": "sync", "time": 1.1, "state": "attached", "reason": "periodic", "generator": "...", "srv_time": 2.2}}'
+    assert jsync(1.1, None) == '{"meta": {"event": "sync", "time": 1.1, "state": "detached", "reason": "periodic", "generator": "..."}}'
+
+    def jmsg(srv_time, msg):
+        return json.dumps({"message": msg, "time": srv_time})
+    assert jmsg(123.4, "aaa")  == '{"message": "aaa", "time": 123.4}'
+
+    data = b""
+    def _(line):
+        nonlocal data
+        assert '\n' not in line
+        data += b(line+'\n')
+
+    A = "service attach"
+    D = "service detach"
+    S = "sync"
+    _( jmsg(1, "aaa")    )  # no timestamp: separated from ↓ jsync(1005) by event
+    _( jevent(1002,   A ))
+    _( jmsg(3, "bbb")    )  # have timestamp from ↓ jsync(1005)
+    _( jmsg(4, "ccc")    )  # ----//----
+    _( jsync(1005, 5)    )  # jsync with srv_time
+    _( jmsg(6, "ddd")    )  # have timestamp from ↑ jsync(1005)
+    _( jmsg(7, "eee")    )  # ----//----
+    _( jevent(1008,   D ))
+    _( jmsg(9, "fff")    )  # no timestamp: separated from ↑ jsync(1005) by event,
+                            # and ↓ jsync(1010) has no srv_time
+    _( jsync(1010, None) )  # jsync without srv_time
+    _( jmsg(11, "ggg")   )  # no timestamp
+
+
+    # expect_notime asserts that "no timestamp" error is raised on next read.
+    def expect_notime(xr, lineno):
+        with raises(xlog.ParseError,
+                match=":%d/ no `utc` and cannot compute timestamp with sync" % lineno):
+            _ = xr.read()
+
+    # expect_msg asserts that specified message with specified timestamp reads next.
+    def expect_msg(xr, timestamp, msg):
+        _ = xr.read()
+        assert type(_) is xlog.Message
+        assert _.message   == msg
+        assert _.timestamp == timestamp
+
+    # expect_event asserts that specified event reads next.
+    def expect_event(xr, timestamp, event):
+        _ = xr.read()
+        assert type(_) is (xlog.SyncEvent  if event == "sync"  else xlog.Event)
+        assert _.event     == event
+        assert _.timestamp == timestamp
+
+
+    xr = xlog.Reader(io.BytesIO(data))
+    br = xlog.Reader(io.BytesIO(data), reverse=True)
+    defer(xr.close)
+    defer(br.close)
+
+    expect_notime(xr,    1       )  # aaa
+    expect_event (xr, 1002,   A  )
+    expect_msg   (xr, 1003, "bbb")
+    expect_msg   (xr, 1004, "ccc")
+    expect_event (xr, 1005,   S  )
+    expect_msg   (xr, 1006, "ddd")
+    expect_msg   (xr, 1007, "eee")
+    expect_event (xr, 1008,   D  )
+    expect_notime(xr,    9       )  # fff
+    expect_event (xr, 1010,   S  )
+    expect_notime(xr,   11       )  # ggg
+
+    expect_notime(br,   -1       )  # ggg
+    expect_event (br, 1010,   S  )
+    expect_notime(br,   -3       )  # fff
+    expect_event (br, 1008,   D  )
+    expect_msg   (br, 1007, "eee")
+    expect_msg   (br, 1006, "ddd")
+    expect_event (br, 1005,   S  )
+    expect_msg   (br, 1004, "ccc")
+    expect_msg   (br, 1003, "bbb")
+    expect_event (br, 1002,   A  )
+    expect_notime(br,   -11      )  # aaa
+
+    # extra check that we can get timestamp of first message if proper sync goes after
+    _( jsync(1012, 12)  )
+    _( jmsg(13, "hhh")  )
+    _( jmsg(14, "iii")  )
+    bb = xlog.Reader(io.BytesIO(data), reverse=True)
+    defer(bb.close)
+    expect_msg   (bb, 1014, "iii")
+    expect_msg   (bb, 1013, "hhh")
+    expect_event (bb, 1012,   S  )
+    expect_msg   (bb, 1011, "ggg")  # now has timestamp because it is covered by ↑ sync(1012)
+    expect_event (bb, 1010,   S  )  # after sync(1010) it goes as for br
+    expect_notime(bb, -3-3       )  # fff
+    expect_event (bb, 1008,   D  )
+    expect_msg   (bb, 1007, "eee")
+    expect_msg   (bb, 1006, "ddd")
+    expect_event (bb, 1005,   S  )
+    expect_msg   (bb, 1004, "ccc")
+    expect_msg   (bb, 1003, "bbb")
+    expect_event (bb, 1002,   A  )
+    expect_notime(bb, -3-11      )  # aaa
 
 
 def test_LogSpec():

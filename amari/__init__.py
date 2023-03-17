@@ -63,7 +63,8 @@ def connect(ctx, wsuri):  # -> Conn
 class Conn:
     # .wsuri            websocket uri of the service
     # ._ws              websocket connection to service
-    # ._srv_ready_msg   message we got for "ready"
+    # .srv_ready_msg    message we got for "ready"
+    # .t_srv_ready_msg  timestamp of "ready" reception
 
     # ._mu              sync.Mutex
     # ._rxtab           {} msgid -> (request, rx channel)  | None
@@ -76,6 +77,7 @@ class Conn:
     def __init__(conn, ws, wsuri):
         try:
             msg0_raw = ws.recv()
+            t_msg0 = time.now()
             msg0 = json.loads(msg0_raw)
             # TODO also support 'authenticate'
             if msg0['message'] != 'ready':
@@ -86,7 +88,8 @@ class Conn:
 
         conn.wsuri = wsuri
         conn._ws = ws
-        conn._srv_ready_msg = msg0
+        conn.srv_ready_msg   = msg0
+        conn.t_srv_ready_msg = t_msg0
 
         conn._mu         = sync.Mutex()
         conn._rxtab      = {}
@@ -236,12 +239,12 @@ class Conn:
 
     @property
     def srv_type(conn):
-        return conn._srv_ready_msg['type']
+        return conn.srv_ready_msg['type']
 
     @property
     def srv_name(conn):
-        return conn._srv_ready_msg['name']
+        return conn.srv_ready_msg['name']
 
     @property
     def srv_version(conn):
-        return conn._srv_ready_msg['version']
+        return conn.srv_ready_msg['version']

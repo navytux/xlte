@@ -247,10 +247,19 @@ class _XLogger:
         defer(conn.close)
 
         # emit "service attach"/"service detach"
+        #
+        # on attach, besides name/type/version, also emit everything present
+        # in the first ready message from the service. This should include
+        # "time" and optionally "utc" for releases ≥ 2022-12-01.
         srv_info = {"srv_name": conn.srv_name,
                     "srv_type": conn.srv_type,
                     "srv_version": conn.srv_version}
-        xl.jemit("service attach", srv_info)
+        srv_iattach = srv_info.copy()
+        for k, v in conn.srv_ready_msg.items():
+            if k in {"message", "type", "name", "version"}:
+                continue
+            srv_iattach["srv_"+k] = v
+        xl.jemit("service attach", srv_iattach)
         def _():
             try:
                 raise
@@ -281,17 +290,21 @@ class _XLogger:
 
     def _xlog1(xl, ctx, conn, xmsgsrv_dict, srv_info):
         # req_ queries either amari service directly, or an extra message service.
-        def req_(ctx, query, opts):  # -> resp_raw
+        def req_(ctx, query, opts):  # -> (t_rx, resp, resp_raw)
             if query in xmsgsrv_dict:
                 query_xsrv = xmsgsrv_dict[query]
-                _, resp_raw = query_xsrv.req_(ctx, opts)
+                resp, resp_raw = query_xsrv.req_(ctx, opts)
             else:
-                _, resp_raw = conn.req_(ctx, query, opts)
-            return resp_raw
+                resp, resp_raw = conn.req_(ctx, query, opts)
+            return (time.now(), resp, resp_raw)
 
         # loop emitting requested logspecs
         t0 = time.now()
         tnextv = [0]*len(xl.logspecv)   # [i] - next time to arm for logspecv[i] relative to t0
+
+        t_rx     = conn.t_srv_ready_msg           # time  of last received message
+        srv_time = conn.srv_ready_msg["time"]     # .time in ----//----
+        srv_utc  = conn.srv_ready_msg.get("utc")  # .utc  in ----//----  (present ≥ 2022-12-01)
 
         while 1:
             # go through all logspecs in the order they were given
@@ -331,9 +344,19 @@ class _XLogger:
                     raise ctx.err()
 
             if logspec.query == 'meta.sync':
-                xl.jemit_sync("attached", "periodic", srv_info)
+                # emit sync with srv_time and srv_utc approximated from last
+                # rx'ed message and local clock run since that reception
+                tnow = time.now()
+                isync = srv_info.copy()
+                isync["srv_time"] = srv_time + (tnow - t_rx)
+                if srv_utc is not None:
+                    isync["srv_utc"]  = srv_utc + (tnow - t_rx)
+                xl.jemit_sync("attached", "periodic", isync)
+
             else:
-                resp_raw = req_(ctx, logspec.query, opts)
+                t_rx, resp, resp_raw = req_(ctx, logspec.query, opts)
+                srv_time = resp["time"]
+                srv_utc  = resp.get("utc")
                 xl.emit(resp_raw)
 
 
@@ -459,6 +482,7 @@ class SyncEvent(Event):
     # .state
     # .reason
     # .generator
+    # .srv_time     | None if not present
     pass
 
 
@@ -503,6 +527,18 @@ def read(xr): # -> Event|Message|None
 
             # message
             assert isinstance(x, Message)
+
+            # provide timestamps for xlog messages generated with eNB < 2022-12-01
+            # there messages come without .utc field and have only .time
+            # we estimate the timestamp from .time and from δ(utc,time) taken from covering sync
+            if x.timestamp is None:
+                if xr._sync is not None  and  xr._sync.srv_time is not None:
+                    # srv_utc' = srv_time' + (time - srv_time)
+                    srv_time_ = x.get1("time", (float,int))  # ParseError if not present
+                    x.timestamp = srv_time_ + (xr._sync.timestamp - xr._sync.srv_time)
+                if x.timestamp is None:
+                    raise ParseError("%s:%d/%s no `utc` and cannot compute "
+                            "timestamp with sync" % (x.pos[0], x.pos[1], '/'.join(x.path)))
 
             # TODO verify messages we get/got against their schedule in covering sync.
             #      Raise LOSError (loss of synchronization) if what we actually see
@@ -569,6 +605,9 @@ def _read1(xr):
             else:
                 x.state  = meta.get1("state",  str)
                 x.reason = meta.get1("reason", str)
+            x.srv_time = None
+            if "srv_time" in meta:
+                x.srv_time = meta.get1("srv_time", (float,int))
             # TODO parse generator -> .logspecv
         return x
 
@@ -578,7 +617,12 @@ def _read1(xr):
         # NOTE .time is internal eNB time using clock originating at eNB startup.
         #      .utc is seconds since epoch counted using OS clock.
         #      .utc field was added in 2022-12-01 - see https://support.amarisoft.com/issues/21934
-        x.timestamp = x.get1("utc", (float,int))
+        # if there is no .utc - we defer computing .timestamp to ^^^ read
+        # where it might estimate it from .time and sync
+        if "utc" in x:
+            x.timestamp = x.get1("utc", (float,int))
+        else:
+            x.timestamp = None
         return x
 
     raise xr._err("invalid xlog entry")
