@@ -45,6 +45,8 @@
 #   - "service detach"              when xlog disconnects from monitored LTE service
 #   - "service connect failure"     when xlog tries to connect to monitored LTE service
 #                                   with unsuccessful result.
+#   - "sync"                        emitted periodically with current state of
+#                                   connection to LTE service and xlog setup
 #   - "xlog failure"                on internal xlog error
 
 
@@ -127,7 +129,22 @@ class LogSpec:
 # xlog queries service @wsuri periodically according to queries specified by
 # logspecv and logs the result.
 def xlog(ctx, wsuri, logspecv):
-    xl = _XLogger(wsuri, logspecv)
+    # make sure we always have meta.sync - either the caller specifies it
+    # explicitly, or we add it automatically to come first with default
+    # 10x·longest periodicity.
+    lsync       = None
+    pmax = 1
+    for (i,l) in enumerate(logspecv):
+        pmax = max(pmax, l.period)
+        if l.query == "meta.sync":
+            lsync = l
+    logspecv = logspecv[:]  # keep caller's intact
+    if lsync is None:
+        lsync = LogSpec("meta.sync", [], pmax*10)
+        logspecv.insert(0, lsync)
+
+
+    xl = _XLogger(wsuri, logspecv, lsync.period)
 
     slogspecv = ' '.join(['%s' % _ for _ in logspecv])
     xl.jemit("start", {"generator": "xlog %s %s" % (wsuri, slogspecv)})
@@ -146,18 +163,21 @@ def xlog(ctx, wsuri, logspecv):
                     # e.g. disk full in xl.jemit itself
                     log.exception('xlog failure (second level):')
 
+        δt_reconnect = min(3, lsync.period)
         _, _rx = select(
-            ctx.done().recv,        # 0
-            time.after(3).recv,     # 1
+            ctx.done().recv,                # 0
+            time.after(δt_reconnect).recv,  # 1
         )
         if _ == 0:
             raise ctx.err()
 
 # _XLogger serves xlog implementation.
 class _XLogger:
-    def __init__(xl, wsuri, logspecv):
+    def __init__(xl, wsuri, logspecv, δt_sync):
         xl.wsuri    = wsuri
         xl.logspecv = logspecv
+        xl.δt_sync  = δt_sync     # = logspecv.get("meta.sync").period
+        xl.tsync    = time.now()  # first `start` serves as sync
 
     # emit saves line to the log.
     def emit(xl, line):
@@ -172,9 +192,24 @@ class _XLogger:
         d = {"meta": d}
         xl.emit(json.dumps(d))
 
+    # jemit_sync emits line with sync event to the log.
+    # TODO logrotate at this point
+    def jemit_sync(xl, state, args_dict):
+        tnow = time.now()
+        d = {"state":   state,
+             "generator": "xlog %s %s" % (xl.wsuri, ' '.join(['%s' % _ for _ in xl.logspecv]))}
+        d.update(args_dict)
+        xl.jemit("sync", d)
+        xl.tsync = tnow
+
     # xlog1 performs one cycle of attach/log,log,log.../detach.
     @func
     def xlog1(xl, ctx):
+        # emit sync periodically even in detached state
+        # this is useful to still know e.g. intended logspec if the service is stopped for a long time
+        if time.now() - xl.tsync  >=  xl.δt_sync:
+            xl.jemit_sync("detached", {})
+
         # connect to the service
         try:
             conn = amari.connect(ctx, xl.wsuri)
@@ -215,10 +250,10 @@ class _XLogger:
                 xsrv_ready.recv()
 
         # spawn main logger
-        wg.go(xl._xlog1, conn, xmsgsrv_dict)
+        wg.go(xl._xlog1, conn, xmsgsrv_dict, srv_info)
 
 
-    def _xlog1(xl, ctx, conn, xmsgsrv_dict):
+    def _xlog1(xl, ctx, conn, xmsgsrv_dict, srv_info):
         # req_ queries either amari service directly, or an extra message service.
         def req_(ctx, query, opts):  # -> resp_raw
             if query in xmsgsrv_dict:
@@ -273,8 +308,11 @@ class _XLogger:
                 if _ == 0:
                     raise ctx.err()
 
-            resp_raw = req_(ctx, logspec.query, opts)
-            xl.emit(resp_raw)
+            if logspec.query == 'meta.sync':
+                xl.jemit_sync("attached", srv_info)
+            else:
+                resp_raw = req_(ctx, logspec.query, opts)
+                xl.emit(resp_raw)
 
 
 # _XMsgServer represents a server for handling particular synthetic requests.
@@ -538,6 +576,11 @@ Besides queries supported by Amarisoft LTE stack natively, support for the
 following synthetic queries is also provided:
 
 %s
+
+Additionally the following queries are used to control xlog itself:
+
+    meta.sync      specify how often synchronization events are emitted
+                   default is 10x the longest period
 
 Options:
 
