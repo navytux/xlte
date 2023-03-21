@@ -68,6 +68,7 @@ from xlte.amari import drb
 
 import json
 import traceback
+import io
 from golang import func, defer, chan, select
 from golang import context, sync, time
 from golang.gcompat import qq
@@ -462,8 +463,12 @@ class SyncEvent(Event):
 
 
 # Reader(r) creates new reader that will read xlog data from r.
+#
+# if reverse=True xlog entries are read in reverse order from end to start.
 @func(Reader)
-def __init__(xr, r):
+def __init__(xr, r, reverse=False):
+    if reverse:
+        r = _ReverseLineReader(r)
     xr._r = r
     xr._lineno = 0
     xr._sync = None
@@ -588,7 +593,8 @@ def _err(xr, text):
 # None is returned at EOF.
 @func(Reader)
 def _jread1(xr): # -> xdict|None
-    xr._lineno += 1
+    xr._lineno +=  1  if not isinstance(xr._r, _ReverseLineReader) else \
+                  -1
     try:
         l = xr._r.readline()
     except Exception as e:
@@ -634,6 +640,96 @@ def get1(xd, key, typeok):
         val.path  = xd.path + (key,)
     return val
 
+
+# _ReverseLineReader serves xlog.Reader by wrapping an IO reader and reading
+# lines from the underlying reader in reverse order.
+#
+# Use .readline() to retrieve lines from end to start.
+# Use .close() when done.
+#
+# The original reader is required to provide both .readline() and .seek() so
+# that backward reading could be done efficiently.
+#
+# Original reader can be opened in either binary or text mode -
+# _ReverseLineReader will provide read data in the same mode as original.
+#
+# The ownership of wrapped reader is transferred to _ReverseLineReader.
+class _ReverseLineReader:
+    # ._r           underlying IO reader
+    # ._bufsize     data is read in so sized chunks
+    # ._buf         current buffer
+    # ._bufpos      ._buf corresponds to ._r[_bufpos:...]
+
+    def __init__(rr, r, bufsize=None):
+        rr._r = r
+        if bufsize is None:
+            bufsize = 8192
+        rr._bufsize = bufsize
+
+        r.seek(0, io.SEEK_END)
+        rr._bufpos = r.tell()
+        if hasattr(r, 'encoding'):  # text
+            rr._buf   =  ''
+            rr._lfchr =  '\n'
+            rr._str0  =  ''
+        else:                       # binary
+            rr._buf   = b''
+            rr._lfchr = b'\n'
+            rr._str0  = b''
+
+        if hasattr(r, 'name'):
+            rr.name = r.name
+
+    # close releases resources associated with the reader.
+    def close(rr):
+        rr._r.close()
+
+    # readline reads next line from underlying stream.
+    # the lines are read backwards from end to start.
+    def readline(rr):  # -> line | ø at EOF
+        chunkv = []
+        while 1:
+            # time to load next buffer
+            if len(rr._buf) == 0:
+                bufpos  = max(0, rr._bufpos - rr._bufsize)
+                bufsize = rr._bufpos - bufpos
+                if bufsize == 0:
+                    break
+                rr._r.seek(bufpos, io.SEEK_SET)
+                rr._buf = _ioreadn(rr._r, bufsize)
+                rr._bufpos = bufpos
+
+            assert len(rr._buf) > 0
+
+            # let's scan to the left where \n is
+            lf = rr._buf.rfind(rr._lfchr)
+            if lf == -1:  # no \n - queue whole buf
+                chunkv.insert(0, rr._buf)
+                rr._buf = rr._buf[:0]
+                continue
+
+            if len(chunkv) == 0  and  lf+1 == len(rr._buf):  # started reading from ending \n
+                chunkv.insert(0, rr._buf[lf:])
+                rr._buf = rr._buf[:lf]
+                continue
+
+            chunkv.insert(0, rr._buf[lf+1:])  # \n of previous line found - we are done
+            rr._buf = rr._buf[:lf+1]
+            break
+
+        return rr._str0.join(chunkv)
+
+
+# _ioreadn reads exactly n elements from f.
+def _ioreadn(f, n):
+    l = n
+    data =  ''  if hasattr(f, 'encoding')  else \
+           b''
+    while len(data) < n:
+        chunk = f.read(l)
+        data += chunk
+        l -= len(chunk)
+    return data[:n]  # slice in case it overreads
 
 # _ioname returns name of a file-like f.
 def _ioname(f):

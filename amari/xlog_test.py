@@ -40,7 +40,7 @@ zzzqqqrrrr
     defer(xr.close)
 
     # :1
-    _ = xr.read()
+    _ = _1 = xr.read()
     assert type(_) is xlog.SyncEvent
     assert _.pos       == ("enb.xlog", 1)
     assert _.event     == "start"
@@ -50,7 +50,7 @@ zzzqqqrrrr
                           "generator":  "xlog ws://localhost:9001 ue_get[]/3.0s erab_get[]/3.0s"}}
 
     # :2
-    _ = xr.read()
+    _ = _2 = xr.read()
     assert type(_) is xlog.Event
     assert _.pos       == ("enb.xlog", 2)
     assert _.event     == "service attach"
@@ -61,7 +61,7 @@ zzzqqqrrrr
                           "srv_type":    "ENB",
                           "srv_version": "2022-12-01"}}
     # :3
-    _ = xr.read()
+    _ = _3 = xr.read()
     assert type(_) is xlog.Message
     assert _.pos       == ("enb.xlog", 3)
     assert _.message   == "ue_get"
@@ -77,7 +77,7 @@ zzzqqqrrrr
         _ = xr.read()
 
     # :5  (restore after bad input)
-    _ = xr.read()
+    _ = _5 = xr.read()
     assert type(_) is xlog.Message
     assert _.pos       == ("enb.xlog", 5)
     assert _.message   == "hello"
@@ -88,6 +88,43 @@ zzzqqqrrrr
 
     # EOF
     _ = xr.read()
+    assert _ is None
+
+
+    # ---- reverse ----
+    f = io.BytesIO(data); f.name = "bbb.xlog"
+    br = xlog.Reader(f, reverse=True)
+
+    # :-1  (:5)
+    _ = br.read()
+    assert type(_) is xlog.Message
+    assert _.pos  == ("bbb.xlog", -1)
+    assert _      == _5
+
+    # :-2  (:4)  (bad input)
+    with raises(xlog.ParseError, match="bbb.xlog:-2 : invalid json"):
+        _ = br.read()
+
+    # :-3  (:3)  (restore after bad input)
+    _ = br.read()
+    assert type(_) is xlog.Message
+    assert _.pos  == ("bbb.xlog", -3)
+    assert _      == _3
+
+    # :-4  (:2)
+    _ = br.read()
+    assert type(_) is xlog.Event
+    assert _.pos  == ("bbb.xlog", -4)
+    assert _      == _2
+
+    # :-5  (:1)
+    _ = br.read()
+    assert type(_) is xlog.SyncEvent
+    assert _.pos  == ("bbb.xlog", -5)
+    assert _      == _1
+
+    # EOF
+    _ = br.read()
     assert _ is None
 
 
@@ -142,3 +179,56 @@ def test_LogSpec():
     assert spec.query == "stats"
     assert spec.optv == ["samples", "rf"]
     assert spec.period == 60.0
+
+
+def test_ReverseLineReader():
+    linev = [
+        'hello world',
+        'привет мир',
+        'zzz',
+        'αβγδ',             # 2-bytes UTF-8 characters
+        '你好'              # 3-bytes ----//----
+        '𩸽𩹨',             # 4-bytes ----//----
+        '{"message":"hello"}',
+    ]
+
+    tdata = '\n'.join(linev) + '\n'     # text
+    bdata = tdata.encode('utf-8')       # binary
+
+    # check verifies _ReverseLineReader on tdata and bdata with particular bufsize.
+    @func
+    def check(bufsize):
+        trr = xlog._ReverseLineReader(io.StringIO(tdata), bufsize)
+        brr = xlog._ReverseLineReader(io.BytesIO (bdata), bufsize)
+        defer(trr.close)
+        defer(brr.close)
+
+        tv = []
+        while 1:
+            tl = trr.readline()
+            if tl == '':
+                break
+            assert tl.endswith('\n')
+            tl = tl[:-1]
+            assert '\n' not in tl
+            tv.append(tl)
+
+        bv = []
+        while 1:
+            bl = brr.readline()
+            if bl == b'':
+                break
+            assert bl.endswith(b'\n')
+            bl = bl[:-1]
+            assert b'\n' not in bl
+            bv.append(bl.decode('utf-8'))
+
+        venil = list(reversed(linev))
+        assert tv == venil
+        assert bv == venil
+
+    # verify all buffer sizes from 1 to 10x bigger the data.
+    # this way we cover all tricky cases where e.g. an UTF8 character is split
+    # in its middle by a buffer.
+    for bufsize in range(1, 10*len(bdata)):
+        check(bufsize)
