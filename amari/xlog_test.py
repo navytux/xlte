@@ -19,7 +19,7 @@
 # See https://www.nexedi.com/licensing for rationale and options.
 
 from xlte.amari import xlog
-from golang import func, defer
+from golang import func, defer, b
 import io
 
 from pytest import raises
@@ -82,6 +82,50 @@ zzzqqqrrrr
                  "utc":         10000}
 
     # EOF
+    _ = xr.read()
+    assert _ is None
+
+
+# verify that EOF is not returned prematurely due to readahead pre-hitting it
+# sooner on the live stream.
+@func
+def test_Reader_readahead_vs_eof():
+    fxlog = io.BytesIO(b'')
+    def logit(line):
+        line = b(line)
+        assert b'\n' not in line
+        pos = fxlog.tell()
+        fxlog.seek(0, io.SEEK_END)
+        fxlog.write(b'%s\n' % line)
+        fxlog.seek(pos, io.SEEK_SET)
+
+    xr = xlog.Reader(fxlog)
+    def expect_msg(τ, msg):
+        _ = xr.read()
+        assert type(_) is xlog.Message
+        assert _.timestamp == τ
+        assert _.message   == msg
+
+    logit('{"message": "aaa", "utc": 1}')
+    logit('{"message": "bbb", "utc": 2}')
+    expect_msg(1, "aaa")
+    expect_msg(2, "bbb")
+
+    # ^^^ readahead hit EOF internally, but at the time next .read() is called,
+    # the stream has more data
+    logit('{"message": "ccc", "utc": 3}')
+    expect_msg(3, "ccc")
+
+    # now, when read is called, the stream has no more data
+    # -> EOF is reported to the caller
+    _ = xr.read()
+    assert _ is None
+
+    # now the stream has more data again
+    logit('{"message": "ddd", "utc": 4}')
+    logit('{"message": "eee", "utc": 5}')
+    expect_msg(4, "ddd")
+    expect_msg(5, "eee")
     _ = xr.read()
     assert _ is None
 
