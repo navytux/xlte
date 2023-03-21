@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -38,8 +38,14 @@ zzzqqqrrrr
     xr = xlog.Reader(io.BytesIO(data))
     defer(xr.close)
 
-    # TODO check xr.tstart     == 0.01
-    # TODO check xr.xlogspecv  == ue_get[]/3.0s erab_get[]/3.0s
+    # :1
+    _ = xr.read()
+    assert type(_) is xlog.SyncEvent
+    assert _.event     == "start"
+    assert _.timestamp == 0.01
+    assert _ == {"meta": {"event":      "start",
+                          "time":       0.01,
+                          "generator":  "xlog ws://localhost:9001 ue_get[]/3.0s erab_get[]/3.0s"}}
 
     # :2
     _ = xr.read()

@@ -154,7 +154,7 @@ def _read(logm):
             x = LogError.EOF # represent EOF as LogError
 
         # ignore sync events
-        if isinstance(x, xlog.Event)  and  x.event == "sync":
+        if isinstance(x, xlog.SyncEvent):
             continue
 
         # handle messages that update current Measurement

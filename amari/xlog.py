@@ -40,12 +40,12 @@
 # Queries are specific to monitored LTE service.
 # Events  are specific to xlog itself and can be as follows:
 #
-#   - "start"                       when xlog starts
 #   - "service attach"              when xlog successfully connects to monitored LTE service
 #   - "service detach"              when xlog disconnects from monitored LTE service
 #   - "service connect failure"     when xlog tries to connect to monitored LTE service
 #                                   with unsuccessful result.
-#   - "sync"                        emitted periodically with current state of
+#   - "sync"                        emitted periodically and when xlogs starts,
+#                                   stops (TODO and rotate logs). Comes with current state of
 #                                   connection to LTE service and xlog setup
 #   - "xlog failure"                on internal xlog error
 
@@ -128,6 +128,7 @@ class LogSpec:
 
 # xlog queries service @wsuri periodically according to queries specified by
 # logspecv and logs the result.
+@func
 def xlog(ctx, wsuri, logspecv):
     # make sure we always have meta.sync - either the caller specifies it
     # explicitly, or we add it automatically to come first with default
@@ -155,8 +156,11 @@ def xlog(ctx, wsuri, logspecv):
 
     xl = _XLogger(wsuri, logspecv, lsync.period)
 
-    slogspecv = ' '.join(['%s' % _ for _ in logspecv])
-    xl.jemit("start", {"generator": "xlog %s %s" % (wsuri, slogspecv)})
+    # emit sync at start/stop
+    xl.jemit_sync("detached", "start", {})
+    def _():
+        xl.jemit_sync("detached", "stop", {})
+    defer(_)
 
     while 1:
         try:
@@ -185,8 +189,8 @@ class _XLogger:
     def __init__(xl, wsuri, logspecv, δt_sync):
         xl.wsuri    = wsuri
         xl.logspecv = logspecv
-        xl.δt_sync  = δt_sync     # = logspecv.get("meta.sync").period
-        xl.tsync    = time.now()  # first `start` serves as sync
+        xl.δt_sync  = δt_sync       # = logspecv.get("meta.sync").period
+        xl.tsync    = float('-inf') # never yet
 
     # emit saves line to the log.
     def emit(xl, line):
@@ -203,9 +207,10 @@ class _XLogger:
 
     # jemit_sync emits line with sync event to the log.
     # TODO logrotate at this point
-    def jemit_sync(xl, state, args_dict):
+    def jemit_sync(xl, state, reason, args_dict):
         tnow = time.now()
         d = {"state":   state,
+             "reason":  reason,
              "generator": "xlog %s %s" % (xl.wsuri, ' '.join(['%s' % _ for _ in xl.logspecv]))}
         d.update(args_dict)
         xl.jemit("sync", d)
@@ -217,7 +222,7 @@ class _XLogger:
         # emit sync periodically even in detached state
         # this is useful to still know e.g. intended logspec if the service is stopped for a long time
         if time.now() - xl.tsync  >=  xl.δt_sync:
-            xl.jemit_sync("detached", {})
+            xl.jemit_sync("detached", "periodic", {})
 
         # connect to the service
         try:
@@ -314,7 +319,7 @@ class _XLogger:
                     raise ctx.err()
 
             if logspec.query == 'meta.sync':
-                xl.jemit_sync("attached", srv_info)
+                xl.jemit_sync("attached", "periodic", srv_info)
             else:
                 resp_raw = req_(ctx, logspec.query, opts)
                 xl.emit(resp_raw)
@@ -429,29 +434,19 @@ class Message(xdict):
     # .timestamp    seconds since epoch
     pass
 
+# SyncEvent specializes Event and represents "sync" event in xlog.
+class SyncEvent(Event):
+    # .state
+    # .reason
+    # .generator
+    pass
+
 
 # Reader(r) creates new reader that will read xlog data from r.
 @func(Reader)
 def __init__(xr, r):
     xr._r = r
     xr._lineno = 0
-
-    # parse header
-    try:
-        head = xr._jread1()
-        if head is None:
-            raise xr._err("header: unexpected EOF")
-        meta = head.get1("meta", dict)
-        ev0, t0 = xr._parse_metahead(meta)
-        if ev0 != "start":
-            raise xr._err("header: starts with meta.event=%s  ; expected `start`" % ev0)
-
-        gen = meta.get1("generator", str)
-        # TODO parse generator -> ._xlogspecv
-
-    except:
-        xr._r.close()
-        raise
 
 # close release resources associated with the Reader.
 @func(Reader)
@@ -469,6 +464,16 @@ def read(xr): # -> Event|Message|None
         x.__class__ = Event
         meta = x.get1("meta", dict)
         x.event, x.timestamp = xr._parse_metahead(meta)
+        if x.event in {"sync", "start"}:  # for backward compatibility with old logs meta:start
+            x.__class__ = SyncEvent       # is reported to users as sync(start) event
+            x.generator = meta.get1("generator", str)
+            if x.event == "start":
+                x.state  = "detached"
+                x.reason = "start"
+            else:
+                x.state  = meta.get1("state",  str)
+                x.reason = meta.get1("reason", str)
+            # TODO parse generator -> .logspecv
         return x
 
     if "message" in x:
