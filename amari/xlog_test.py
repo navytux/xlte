@@ -35,12 +35,14 @@ zzzqqqrrrr
 {"message":"hello","message_id":3,"utc":10000}
 """
 
-    xr = xlog.Reader(io.BytesIO(data))
+    f = io.BytesIO(data); f.name = "enb.xlog"
+    xr = xlog.Reader(f)
     defer(xr.close)
 
     # :1
     _ = xr.read()
     assert type(_) is xlog.SyncEvent
+    assert _.pos       == ("enb.xlog", 1)
     assert _.event     == "start"
     assert _.timestamp == 0.01
     assert _ == {"meta": {"event":      "start",
@@ -50,6 +52,7 @@ zzzqqqrrrr
     # :2
     _ = xr.read()
     assert type(_) is xlog.Event
+    assert _.pos       == ("enb.xlog", 2)
     assert _.event     == "service attach"
     assert _.timestamp == 0.02
     assert _ == {"meta": {"event":       "service attach",
@@ -60,6 +63,7 @@ zzzqqqrrrr
     # :3
     _ = xr.read()
     assert type(_) is xlog.Message
+    assert _.pos       == ("enb.xlog", 3)
     assert _.message   == "ue_get"
     assert _.timestamp == 9613.347
     assert _ == {"message":     "ue_get",
@@ -69,12 +73,13 @@ zzzqqqrrrr
                  "utc":         9613.347}
 
     # :4  (bad input)
-    with raises(xlog.ParseError, match=":4 : invalid json"):
+    with raises(xlog.ParseError, match="enb.xlog:4 : invalid json"):
         _ = xr.read()
 
     # :5  (restore after bad input)
     _ = xr.read()
     assert type(_) is xlog.Message
+    assert _.pos       == ("enb.xlog", 5)
     assert _.message   == "hello"
     assert _.timestamp == 10000
     assert _ == {"message":     "hello",
