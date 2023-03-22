@@ -536,6 +536,35 @@ def test_LogMeasure_cc_wraparound():
     readok(4, 10)           # 4-5
 
 
+# verify that LogMeasure ignores syncs in xlog stream.
+@func
+def test_LogMeasure_sync():
+    t = tLogMeasure()
+    defer(t.close)
+    _ = t.expect1
+
+    cc = 'rrc_connection_request'
+    CC = 'RRC.ConnEstabAtt.sum'
+
+    t.xlog( jstats(1, {}) )
+    t.xlog( jstats(2, {cc: 4}) )
+    t.xlog( '{"meta": {"event": "sync", "time": 2.5, "state": "attached", "reason": "periodic", "generator": "xlog ws://localhost:9001 stats[]/30.0s"}}' )
+    t.xlog( jstats(3, {cc: 7}) )
+
+    def readok(τ, CC_value):
+        _('X.Tstart',   τ)
+        _('X.δT',       int(τ+1)-τ)
+        if CC_value is not None:
+            _(CC,       CC_value)
+        else:
+            t.expect_nodata()
+        t.read()
+
+    readok(0.02, None)      # attach-1
+    readok(1, 4)            # 1-2
+    readok(2, 3)            # 2-3  jumping over sync
+
+
 # jstats returns json-encoded stats message corresponding to counters dict.
 # τ goes directly to stats['utc'] as is.
 def jstats(τ, counters):  # -> str

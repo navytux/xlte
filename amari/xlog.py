@@ -40,12 +40,17 @@
 # Queries are specific to monitored LTE service.
 # Events  are specific to xlog itself and can be as follows:
 #
-#   - "start"                       when xlog starts
 #   - "service attach"              when xlog successfully connects to monitored LTE service
 #   - "service detach"              when xlog disconnects from monitored LTE service
 #   - "service connect failure"     when xlog tries to connect to monitored LTE service
 #                                   with unsuccessful result.
+#   - "sync"                        emitted periodically and when xlogs starts,
+#                                   stops (TODO and rotate logs). Comes with current state of
+#                                   connection to LTE service and xlog setup
 #   - "xlog failure"                on internal xlog error
+#
+# it is guaranteed that valid xlog stream has a sync event at least every LOS_window entries.
+LOS_window = 1000
 
 
 # TODO log file + rotate
@@ -63,6 +68,7 @@ from xlte.amari import drb
 
 import json
 import traceback
+import io
 from golang import func, defer, chan, select
 from golang import context, sync, time
 from golang.gcompat import qq
@@ -78,6 +84,11 @@ class LogSpec:
     # .period       how often to issue the query (seconds)
 
     DEFAULT_PERIOD = 60
+
+    def __init__(spec, query, optv, period):
+        spec.query  = query
+        spec.optv   = optv
+        spec.period = period
 
     def __str__(spec):
         return "%s[%s]/%ss" % (spec.query, ','.join(spec.optv), spec.period)
@@ -116,20 +127,52 @@ class LogSpec:
             if c in query:
                 bad("invalid query")
 
-        spec = LogSpec()
-        spec.query  = query
-        spec.optv   = optv
-        spec.period = period
-        return spec
+        return LogSpec(query, optv, period)
 
 
 # xlog queries service @wsuri periodically according to queries specified by
 # logspecv and logs the result.
+@func
 def xlog(ctx, wsuri, logspecv):
-    xl = _XLogger(wsuri, logspecv)
+    # make sure we always have meta.sync - either the caller specifies it
+    # explicitly, or we add it automatically to come first with default
+    # 10x·longest periodicity. Do the same about config_get - by default we
+    # want it to be present after every sync.
+    lsync       = None
+    isync       = None
+    lconfig_get = None
+    pmax = 1
+    for (i,l) in enumerate(logspecv):
+        pmax = max(pmax, l.period)
+        if l.query == "meta.sync":
+            isync = i
+            lsync = l
+        if l.query == "config_get":
+            lconfig_get = l
+    logspecv = logspecv[:]  # keep caller's intact
+    if lsync is None:
+        isync = 0
+        lsync = LogSpec("meta.sync", [], pmax*10)
+        logspecv.insert(0, lsync)
+    if lconfig_get is None:
+        logspecv.insert(isync+1, LogSpec("config_get", [], lsync.period))
 
-    slogspecv = ' '.join(['%s' % _ for _ in logspecv])
-    xl.jemit("start", {"generator": "xlog %s %s" % (wsuri, slogspecv)})
+    # verify that sync will come at least every LOS_window records
+    ns = 0
+    for l in logspecv:
+        ns += (lsync.period / l.period)
+    if ns > LOS_window:
+        raise ValueError("meta.sync asked to come ~ every %d entries, "
+            "which is > LOS_window (%d)" % (ns, LOS_window))
+
+    # ready to start logging
+    xl = _XLogger(wsuri, logspecv, lsync.period)
+
+    # emit sync at start/stop
+    xl.jemit_sync("detached", "start", {})
+    def _():
+        xl.jemit_sync("detached", "stop", {})
+    defer(_)
 
     while 1:
         try:
@@ -145,13 +188,21 @@ def xlog(ctx, wsuri, logspecv):
                     # e.g. disk full in xl.jemit itself
                     log.exception('xlog failure (second level):')
 
-        time.sleep(3)
+        δt_reconnect = min(3, lsync.period)
+        _, _rx = select(
+            ctx.done().recv,                # 0
+            time.after(δt_reconnect).recv,  # 1
+        )
+        if _ == 0:
+            raise ctx.err()
 
 # _XLogger serves xlog implementation.
 class _XLogger:
-    def __init__(xl, wsuri, logspecv):
+    def __init__(xl, wsuri, logspecv, δt_sync):
         xl.wsuri    = wsuri
         xl.logspecv = logspecv
+        xl.δt_sync  = δt_sync       # = logspecv.get("meta.sync").period
+        xl.tsync    = float('-inf') # never yet
 
     # emit saves line to the log.
     def emit(xl, line):
@@ -166,9 +217,25 @@ class _XLogger:
         d = {"meta": d}
         xl.emit(json.dumps(d))
 
+    # jemit_sync emits line with sync event to the log.
+    # TODO logrotate at this point
+    def jemit_sync(xl, state, reason, args_dict):
+        tnow = time.now()
+        d = {"state":   state,
+             "reason":  reason,
+             "generator": "xlog %s %s" % (xl.wsuri, ' '.join(['%s' % _ for _ in xl.logspecv]))}
+        d.update(args_dict)
+        xl.jemit("sync", d)
+        xl.tsync = tnow
+
     # xlog1 performs one cycle of attach/log,log,log.../detach.
     @func
     def xlog1(xl, ctx):
+        # emit sync periodically even in detached state
+        # this is useful to still know e.g. intended logspec if the service is stopped for a long time
+        if time.now() - xl.tsync  >=  xl.δt_sync:
+            xl.jemit_sync("detached", "periodic", {})
+
         # connect to the service
         try:
             conn = amari.connect(ctx, xl.wsuri)
@@ -180,10 +247,19 @@ class _XLogger:
         defer(conn.close)
 
         # emit "service attach"/"service detach"
+        #
+        # on attach, besides name/type/version, also emit everything present
+        # in the first ready message from the service. This should include
+        # "time" and optionally "utc" for releases ≥ 2022-12-01.
         srv_info = {"srv_name": conn.srv_name,
                     "srv_type": conn.srv_type,
                     "srv_version": conn.srv_version}
-        xl.jemit("service attach", srv_info)
+        srv_iattach = srv_info.copy()
+        for k, v in conn.srv_ready_msg.items():
+            if k in {"message", "type", "name", "version"}:
+                continue
+            srv_iattach["srv_"+k] = v
+        xl.jemit("service attach", srv_iattach)
         def _():
             try:
                 raise
@@ -209,26 +285,26 @@ class _XLogger:
                 xsrv_ready.recv()
 
         # spawn main logger
-        wg.go(xl._xlog1, conn, xmsgsrv_dict)
+        wg.go(xl._xlog1, conn, xmsgsrv_dict, srv_info)
 
 
-    def _xlog1(xl, ctx, conn, xmsgsrv_dict):
+    def _xlog1(xl, ctx, conn, xmsgsrv_dict, srv_info):
         # req_ queries either amari service directly, or an extra message service.
-        def req_(ctx, query, opts):  # -> resp_raw
+        def req_(ctx, query, opts):  # -> (t_rx, resp, resp_raw)
             if query in xmsgsrv_dict:
                 query_xsrv = xmsgsrv_dict[query]
-                _, resp_raw = query_xsrv.req_(ctx, opts)
+                resp, resp_raw = query_xsrv.req_(ctx, opts)
             else:
-                _, resp_raw = conn.req_(ctx, query, opts)
-            return resp_raw
-
-        # emit config_get after attach
-        cfg_raw = req_(ctx, 'config_get', {})
-        xl.emit(cfg_raw)
+                resp, resp_raw = conn.req_(ctx, query, opts)
+            return (time.now(), resp, resp_raw)
 
         # loop emitting requested logspecs
         t0 = time.now()
         tnextv = [0]*len(xl.logspecv)   # [i] - next time to arm for logspecv[i] relative to t0
+
+        t_rx     = conn.t_srv_ready_msg           # time  of last received message
+        srv_time = conn.srv_ready_msg["time"]     # .time in ----//----
+        srv_utc  = conn.srv_ready_msg.get("utc")  # .utc  in ----//----  (present ≥ 2022-12-01)
 
         while 1:
             # go through all logspecs in the order they were given
@@ -267,8 +343,21 @@ class _XLogger:
                 if _ == 0:
                     raise ctx.err()
 
-            resp_raw = req_(ctx, logspec.query, opts)
-            xl.emit(resp_raw)
+            if logspec.query == 'meta.sync':
+                # emit sync with srv_time and srv_utc approximated from last
+                # rx'ed message and local clock run since that reception
+                tnow = time.now()
+                isync = srv_info.copy()
+                isync["srv_time"] = srv_time + (tnow - t_rx)
+                if srv_utc is not None:
+                    isync["srv_utc"]  = srv_utc + (tnow - t_rx)
+                xl.jemit_sync("attached", "periodic", isync)
+
+            else:
+                t_rx, resp, resp_raw = req_(ctx, logspec.query, opts)
+                srv_time = resp["time"]
+                srv_utc  = resp.get("utc")
+                xl.emit(resp_raw)
 
 
 # _XMsgServer represents a server for handling particular synthetic requests.
@@ -353,10 +442,18 @@ _xmsg("x.drb_stats", drb._x_stats_srv, "retrieve statistics about data radio bea
 #
 # The reader must provide .readline() method.
 # The ownership of wrapped reader is transferred to the Reader.
-class ParseError(RuntimeError): pass
+class ParseError(RuntimeError): pass    # an entry could not be parsed
+class LOSError(RuntimeError): pass      # loss of synchronization
 class Reader:
     # ._r        underlying IO reader
     # ._lineno   current line number
+    # ._sync     sync(attached) covering current message(s) | None
+    #            for a message M sync S covering it can come in the log both before and after M
+    #            S covers M if there is no other event/error E in between S and M
+    # ._n_nosync for how long we have not seen a sync
+    # ._emsgq    [](Message|Event|Exception)
+    #            queue for messages/events/... while we are reading ahead to look for sync
+    #            non-message could be only at tail
     pass
 
 # xdict represents dict loaded from xlog entry.
@@ -380,29 +477,27 @@ class Message(xdict):
     # .timestamp    seconds since epoch
     pass
 
+# SyncEvent specializes Event and represents "sync" event in xlog.
+class SyncEvent(Event):
+    # .state
+    # .reason
+    # .generator
+    # .srv_time     | None if not present
+    pass
+
 
 # Reader(r) creates new reader that will read xlog data from r.
+#
+# if reverse=True xlog entries are read in reverse order from end to start.
 @func(Reader)
-def __init__(xr, r):
+def __init__(xr, r, reverse=False):
+    if reverse:
+        r = _ReverseLineReader(r)
     xr._r = r
     xr._lineno = 0
-
-    # parse header
-    try:
-        head = xr._jread1()
-        if head is None:
-            raise xr._err("header: unexpected EOF")
-        meta = head.get1("meta", dict)
-        ev0, t0 = xr._parse_metahead(meta)
-        if ev0 != "start":
-            raise xr._err("header: starts with meta.event=%s  ; expected `start`" % ev0)
-
-        gen = meta.get1("generator", str)
-        # TODO parse generator -> ._xlogspecv
-
-    except:
-        xr._r.close()
-        raise
+    xr._sync = None
+    xr._n_nosync = 0
+    xr._emsgq = []
 
 # close release resources associated with the Reader.
 @func(Reader)
@@ -412,6 +507,87 @@ def close(xr):
 # read returns next xlog entry or None at EOF.
 @func(Reader)
 def read(xr): # -> Event|Message|None
+    while 1:
+        # flush what we queued during readahead
+        if len(xr._emsgq) > 0:
+            x = xr._emsgq.pop(0)
+
+            # event/error
+            if not isinstance(x, Message):
+                for _ in xr._emsgq:  # non-message could be only at tail
+                    assert not isinstance(_, Message), _
+                if isinstance(x, SyncEvent) and x.state == "attached":
+                    assert xr._sync is x  # readahead should have set it
+                else:
+                    # attach/detach/sync(detached)/error separate sync from other messages
+                    xr._sync = None
+                if isinstance(x, Exception):
+                    raise x
+                return x
+
+            # message
+            assert isinstance(x, Message)
+
+            # provide timestamps for xlog messages generated with eNB < 2022-12-01
+            # there messages come without .utc field and have only .time
+            # we estimate the timestamp from .time and from δ(utc,time) taken from covering sync
+            if x.timestamp is None:
+                if xr._sync is not None  and  xr._sync.srv_time is not None:
+                    # srv_utc' = srv_time' + (time - srv_time)
+                    srv_time_ = x.get1("time", (float,int))  # ParseError if not present
+                    x.timestamp = srv_time_ + (xr._sync.timestamp - xr._sync.srv_time)
+                if x.timestamp is None:
+                    raise ParseError("%s:%d/%s no `utc` and cannot compute "
+                            "timestamp with sync" % (x.pos[0], x.pos[1], '/'.join(x.path)))
+
+            # TODO verify messages we get/got against their schedule in covering sync.
+            #      Raise LOSError (loss of synchronization) if what we actually see
+            #      does not match what sync says it should be.
+
+            return x
+        assert len(xr._emsgq) == 0
+
+        # read next message/event/... potentially reading ahead while looking for covering sync
+        while 1:
+            try:
+                x = xr._read1()
+            except Exception as e:
+                x = e
+
+            # if we see EOF - we return it to outside only if the queue is empty
+            # otherwise it might be that readahead reaches EOF early, but at
+            # the time when queue flush would want to yield it to the user, the
+            # stream might have more data.
+            if x is None:
+                if len(xr._emsgq) == 0:
+                    return None
+                else:
+                    break # flush the queue
+
+            xr._emsgq.append(x)
+
+            # if we see sync(attached) - it will cover future messages till next
+            # event, and messages that are already queued
+            if isinstance(x, SyncEvent):
+                xr._n_nosync = 0
+                if x.state == "attached":
+                    xr._sync = x
+            else:
+                xr._n_nosync += 1
+                if xr._n_nosync > LOS_window:
+                    xr._emsgq.append(LOSError("no sync for %d entries" % xr._n_nosync))
+
+            if isinstance(x, Message):
+                if xr._sync is None:    # have message and no sync -
+                    continue            # - continue to read ahead to find it
+
+            # message with sync or any event - flush the queue
+            break
+
+# _read1 serves read by reading one next raw entry from the log.
+# it does not detect loss of synchronization.
+@func(Reader)
+def _read1(xr):
     x = xr._jread1()
     if x is None:
         return None
@@ -420,6 +596,19 @@ def read(xr): # -> Event|Message|None
         x.__class__ = Event
         meta = x.get1("meta", dict)
         x.event, x.timestamp = xr._parse_metahead(meta)
+        if x.event in {"sync", "start"}:  # for backward compatibility with old logs meta:start
+            x.__class__ = SyncEvent       # is reported to users as sync(start) event
+            x.generator = meta.get1("generator", str)
+            if x.event == "start":
+                x.state  = "detached"
+                x.reason = "start"
+            else:
+                x.state  = meta.get1("state",  str)
+                x.reason = meta.get1("reason", str)
+            x.srv_time = None
+            if "srv_time" in meta:
+                x.srv_time = meta.get1("srv_time", (float,int))
+            # TODO parse generator -> .logspecv
         return x
 
     if "message" in x:
@@ -428,7 +617,12 @@ def read(xr): # -> Event|Message|None
         # NOTE .time is internal eNB time using clock originating at eNB startup.
         #      .utc is seconds since epoch counted using OS clock.
         #      .utc field was added in 2022-12-01 - see https://support.amarisoft.com/issues/21934
-        x.timestamp = x.get1("utc", (float,int))
+        # if there is no .utc - we defer computing .timestamp to ^^^ read
+        # where it might estimate it from .time and sync
+        if "utc" in x:
+            x.timestamp = x.get1("utc", (float,int))
+        else:
+            x.timestamp = None
         return x
 
     raise xr._err("invalid xlog entry")
@@ -443,7 +637,8 @@ def _err(xr, text):
 # None is returned at EOF.
 @func(Reader)
 def _jread1(xr): # -> xdict|None
-    xr._lineno += 1
+    xr._lineno +=  1  if not isinstance(xr._r, _ReverseLineReader) else \
+                  -1
     try:
         l = xr._r.readline()
     except Exception as e:
@@ -490,6 +685,96 @@ def get1(xd, key, typeok):
     return val
 
 
+# _ReverseLineReader serves xlog.Reader by wrapping an IO reader and reading
+# lines from the underlying reader in reverse order.
+#
+# Use .readline() to retrieve lines from end to start.
+# Use .close() when done.
+#
+# The original reader is required to provide both .readline() and .seek() so
+# that backward reading could be done efficiently.
+#
+# Original reader can be opened in either binary or text mode -
+# _ReverseLineReader will provide read data in the same mode as original.
+#
+# The ownership of wrapped reader is transferred to _ReverseLineReader.
+class _ReverseLineReader:
+    # ._r           underlying IO reader
+    # ._bufsize     data is read in so sized chunks
+    # ._buf         current buffer
+    # ._bufpos      ._buf corresponds to ._r[_bufpos:...]
+
+    def __init__(rr, r, bufsize=None):
+        rr._r = r
+        if bufsize is None:
+            bufsize = 8192
+        rr._bufsize = bufsize
+
+        r.seek(0, io.SEEK_END)
+        rr._bufpos = r.tell()
+        if hasattr(r, 'encoding'):  # text
+            rr._buf   =  ''
+            rr._lfchr =  '\n'
+            rr._str0  =  ''
+        else:                       # binary
+            rr._buf   = b''
+            rr._lfchr = b'\n'
+            rr._str0  = b''
+
+        if hasattr(r, 'name'):
+            rr.name = r.name
+
+    # close releases resources associated with the reader.
+    def close(rr):
+        rr._r.close()
+
+    # readline reads next line from underlying stream.
+    # the lines are read backwards from end to start.
+    def readline(rr):  # -> line | ø at EOF
+        chunkv = []
+        while 1:
+            # time to load next buffer
+            if len(rr._buf) == 0:
+                bufpos  = max(0, rr._bufpos - rr._bufsize)
+                bufsize = rr._bufpos - bufpos
+                if bufsize == 0:
+                    break
+                rr._r.seek(bufpos, io.SEEK_SET)
+                rr._buf = _ioreadn(rr._r, bufsize)
+                rr._bufpos = bufpos
+
+            assert len(rr._buf) > 0
+
+            # let's scan to the left where \n is
+            lf = rr._buf.rfind(rr._lfchr)
+            if lf == -1:  # no \n - queue whole buf
+                chunkv.insert(0, rr._buf)
+                rr._buf = rr._buf[:0]
+                continue
+
+            if len(chunkv) == 0  and  lf+1 == len(rr._buf):  # started reading from ending \n
+                chunkv.insert(0, rr._buf[lf:])
+                rr._buf = rr._buf[:lf]
+                continue
+
+            chunkv.insert(0, rr._buf[lf+1:])  # \n of previous line found - we are done
+            rr._buf = rr._buf[:lf+1]
+            break
+
+        return rr._str0.join(chunkv)
+
+
+# _ioreadn reads exactly n elements from f.
+def _ioreadn(f, n):
+    l = n
+    data =  ''  if hasattr(f, 'encoding')  else \
+           b''
+    while len(data) < n:
+        chunk = f.read(l)
+        data += chunk
+        l -= len(chunk)
+    return data[:n]  # slice in case it overreads
+
 # _ioname returns name of a file-like f.
 def _ioname(f):
     if hasattr(f, 'name'):
@@ -532,6 +817,11 @@ Besides queries supported by Amarisoft LTE stack natively, support for the
 following synthetic queries is also provided:
 
 %s
+
+Additionally the following queries are used to control xlog itself:
+
+    meta.sync      specify how often synchronization events are emitted
+                   default is 10x the longest period
 
 Options:
 

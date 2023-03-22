@@ -47,7 +47,7 @@ class LogMeasure:
     # ._rlog        IO reader for enb.log
     #
     # ._estats      \/ last xlog.Message with read stats result
-    #               \/ last xlog.Event | LogError
+    #               \/ last xlog.Event\sync | LogError
     #               \/ None
     # ._m           kpi.Measurement being prepared covering [_estats_prev, _estats) | None
     # ._m_next      kpi.Measurement being prepared covering [_estats, _estats_next) | None
@@ -153,6 +153,10 @@ def _read(logm):
         if x is None:
             x = LogError.EOF # represent EOF as LogError
 
+        # ignore sync events
+        if isinstance(x, xlog.SyncEvent):
+            continue
+
         # handle messages that update current Measurement
         if isinstance(x, xlog.Message):
             if x.message == "x.drb_stats":
@@ -162,7 +166,7 @@ def _read(logm):
                 continue    # ignore other messages
 
 
-        # it is an error, event or stats.
+        # it is an error, event\sync or stats.
         # if it is an event or stats -> finalize timestamp for _m_next.
         # start building next _m_next covering [x, x_next).
         # shift m <- ._m <- ._m_next <- (new Measurement | None for LogError)
