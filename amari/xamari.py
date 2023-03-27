@@ -22,7 +22,7 @@
 # See https://www.nexedi.com/licensing for rationale and options.
 """xamari is a driver program for invoking xlte.amari subcommands"""
 
-from __future__ import print_function
+from __future__ import print_function, division, absolute_import
 
 from xlte.amari import help as help_module
 

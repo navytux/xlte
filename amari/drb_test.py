@@ -18,6 +18,8 @@
 # See COPYING file for full licensing terms.
 # See https://www.nexedi.com/licensing for rationale and options.
 
+from __future__ import print_function, division, absolute_import
+
 from xlte.amari.drb import _Sampler, Sample, _BitSync, tti, _IncStats
 import numpy as np
 from golang import func

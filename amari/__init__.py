@@ -22,6 +22,8 @@
 - connect and Conn allow to interoperate with a service via WebSocket.
 """
 
+from __future__ import print_function, division, absolute_import
+
 import websocket
 import json
 from golang import chan, select, nilchan, func, defer, panic

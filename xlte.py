@@ -19,6 +19,8 @@
 # See COPYING file for full licensing terms.
 # See https://www.nexedi.com/licensing for rationale and options.
 
+from __future__ import print_function, division, absolute_import
+
 # tell python xlte.* modules hierarchy starts at top-level
 #
 # This allows e.g.          `import xlte.amari`

@@ -1,5 +1,5 @@
 # XLTE pythonic package setup
-# Copyright (C) 2014 - 2022  Nexedi SA and Contributors.
+# Copyright (C) 2014 - 2023  Nexedi SA and Contributors.
 #                            Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
@@ -17,6 +17,8 @@
 #
 # See COPYING file for full licensing terms.
 # See https://www.nexedi.com/licensing for rationale and options.
+
+from __future__ import print_function, division, absolute_import
 
 from setuptools import setup, find_packages
 from setuptools.command.build_py import build_py as _build_py

@@ -48,6 +48,8 @@ See following 3GPP standards for KPI-related topics:
 (*) for example package amari.kpi provides such measurements driver for Amarisoft LTE stack.
 """
 
+from __future__ import print_function, division, absolute_import
+
 import numpy as np
 from golang import func
 

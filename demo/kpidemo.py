@@ -4,6 +4,8 @@
 Usage: kpidemo <time period> <enb.xlog uri>
 """
 
+from __future__ import print_function, division, absolute_import
+
 from xlte import kpi
 from xlte.amari import kpi as akpi
 from golang import func, defer

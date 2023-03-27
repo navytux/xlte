@@ -18,6 +18,8 @@
 # See COPYING file for full licensing terms.
 # See https://www.nexedi.com/licensing for rationale and options.
 
+from __future__ import print_function, division, absolute_import
+
 from xlte.amari.kpi import LogMeasure, LogError, _trace as trace
 from xlte.kpi import Measurement, isNA
 from golang import func, defer, b

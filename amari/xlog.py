@@ -27,6 +27,8 @@
 (*) for example result of stats, ue_get, erab_get and synthetic queries.
 """
 
+from __future__ import print_function, division, absolute_import
+
 # XLog protocol
 #
 # XLog contains entries of 2 kinds:
