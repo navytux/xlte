@@ -621,8 +621,8 @@ def test_jdrb_stats():
     assert jdrb_stats(100, {5: drb_trx(0.1,1234, 0.2,4321),
                             9: drb_trx(1.1,7777, 1.2,8888)}) == ( \
         '{"message": "x.drb_stats", "utc": 100, "qci_dict":' + \
-        ' {"5": {"dl_tx_bytes": 1234, "dl_tx_time": %(0.1+x)s, "dl_tx_time_notailtti": %(0.1-x)s,' + \
-        ' "ul_tx_bytes": 4321, "ul_tx_time": %(0.2+x)s, "ul_tx_time_notailtti": %(0.2-x)s,' + \
+        ' {"5": {"dl_tx_bytes": 1234, "dl_tx_time": %(0.1+x)r, "dl_tx_time_notailtti": %(0.1-x)r,' + \
+        ' "ul_tx_bytes": 4321, "ul_tx_time": %(0.2+x)r, "ul_tx_time_notailtti": %(0.2-x)r,' + \
         ' "dl_tx_time_err": 0, "ul_tx_time_err": 0, "dl_tx_time_notailtti_err": 0, "ul_tx_time_notailtti_err": 0},' + \
         ' "9": {"dl_tx_bytes": 7777, "dl_tx_time": 1.11, "dl_tx_time_notailtti": 1.09,' + \
         ' "ul_tx_bytes": 8888, "ul_tx_time": 1.21, "ul_tx_time_notailtti": 1.19,' + \
