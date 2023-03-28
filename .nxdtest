@@ -1,0 +1,4 @@
+# setup to run tests on Nexedi testing infrastructure.
+# https://stack.nexedi.com/test_status
+
+TestCase('pytest', ['python',  '-m', 'pytest'], summaryf=PyTest.summary)
