@@ -106,6 +106,11 @@ setup(
 
     classifiers = [_.strip() for _ in """\
         Development Status :: 2 - Pre-Alpha
+        Programming Language :: Python
+        Programming Language :: Python :: 3
+        Programming Language :: Python :: 3.9
+        Programming Language :: Python :: 3.10
+        Programming Language :: Python :: 3.11
         Intended Audience :: Developers
         Intended Audience :: Telecommunications Industry
         Operating System :: POSIX :: Linux\
