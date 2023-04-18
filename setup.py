@@ -105,7 +105,7 @@ setup(
                   },
 
     classifiers = [_.strip() for _ in """\
-        Development Status :: 2 - Pre-Alpha
+        Development Status :: 2 - Alpha
         Programming Language :: Python
         Programming Language :: Python :: 3
         Programming Language :: Python :: 3.9
