@@ -462,7 +462,7 @@ _xmsg("x.drb_stats", drb._x_stats_srv, "retrieve statistics about data radio bea
 
 # _openwriter opens destination log file for writing.
 # the file is configured to be logrotated according to rotatespec.
-def _openwriter(path: str, rotatespec: str|None) -> IWriter:
+def _openwriter(path: str, rotatespec) -> IWriter:
     if rotatespec is None:
         return _PlainWriter(path)
 
