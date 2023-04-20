@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """kpidemo - plot KPIs computed from enb.xlog
 
+Also print total for raw counters.
+
 Usage: kpidemo <time period> <enb.xlog uri>
 """
 
@@ -127,7 +129,15 @@ def main():
     facc, fthp = fig.subfigures(1, 2)
     figplot_erab_accessibility  (facc, vτ, vInititialEPSBEstabSR, vAddedEPSBEstabSR, tperiod)
     figplot_eutran_ip_throughput(fthp, vτ, vIPThp_qci, tperiod)
-    plt.show()
+    defer(plt.show)
+
+
+    # Step 5. Print total for raw counters.
+    mhead = mlog.data()[0]
+    mtail = mlog.data()[-1]
+    calc_total = kpi.Calc(mlog, mhead['X.Tstart'], mtail['X.Tstart']+mtail['X.δT'])
+    Σ = calc_total.sum()
+    print_ΣMeasurement(Σ)
 
 
 # ---- plotting routines ----
@@ -236,6 +246,44 @@ def vτ_period_pretty(vτ):
     if min == max:
         return tpretty(min)
     return "%s ±%s  [%s, %s]" % (tpretty(avg), tpretty(std), tpretty(min), tpretty(max))
+
+
+# ---- printing routines ----
+
+# print_ΣMeasurement prints aggregated counters.
+def print_ΣMeasurement(Σ: kpi.ΣMeasurement):
+    print("Time:\t%s  -  %s" % (datetime.fromtimestamp(Σ['X.Tstart']),
+                                datetime.fromtimestamp(Σ['X.Tstart'] + Σ['X.δT'])))
+    # emit1 prints one field.
+    def emit1(name, v, τ_na):
+        fmt = "%12s   "
+        if kpi.isNA(v):
+            s = fmt % "NA"
+        else:
+            if isinstance(v, np.floating):
+                fmt = "%15.2f"
+            s = fmt % v
+            pna = τ_na / Σ['X.δT'] * 100
+            if pna >= 0.01:
+                s += "  (%.2f%% NA)" % pna
+        print("%-32s:\t%s" % (name, s))
+
+    for field in Σ._dtype0.names:
+        if field in ('X.Tstart', 'X.δT'):
+            continue
+        v    = Σ[field]['value']
+        τ_na = Σ[field]['τ_na']
+        if v.shape == ():                   # scalar
+            emit1(field, v, τ_na)
+        else:
+            assert len(v.shape) == 1
+            if kpi.isNA(v).all():           # subarray full of ø
+                emit1(field, v[0], τ_na[0])
+            else:                           # subarray with some non-ø data
+                for k in range(v.shape[0]):
+                    if v[k] != 0:
+                        fieldk = '%s.%d' % (field[:field.rfind('.')], k)  # name.QCI -> name.k
+                        emit1(fieldk, v[k], τ_na[k])
 
 
 if __name__ == '__main__':

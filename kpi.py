@@ -21,7 +21,8 @@
 
 - Calc is KPI calculator. It can be instantiated on MeasurementLog and time
   interval over which to perform computations. Use Calc methods such as
-  .erab_accessibility() and .eutran_ip_throughput() to compute KPIs.
+  .erab_accessibility() and .eutran_ip_throughput() to compute KPIs, and .sum()
+  to compute aggregated measurements.
 
 - MeasurementLog maintains journal with result of measurements. Use .append()
   to populate it with data.
@@ -70,8 +71,9 @@ from golang import func
 #       ──────|─────|────[────|────)──────|──────|────────>
 #                    ←─ τ_lo      τ_hi ──→          time
 #
+# It is also possible to merely aggregate measured values via .sum() .
 #
-# See also: MeasurementLog, Measurement.
+# See also: MeasurementLog, Measurement, ΣMeasurement.
 class Calc:
     # ._data            []Measurement - fully inside [.τ_lo, .τ_hi)
     # [.τ_lo, .τ_hi)    time interval to compute over. Potentially wider than originally requested.
@@ -217,6 +219,27 @@ class Interval(np.void):
     ])
 
 
+# ΣMeasurement represents result of aggregation of several Measurements.
+#
+# It is similar to Measurement, but each value comes accompanied with
+# information about how much time there was no data for that field:
+#
+#       Σ[f].value = Σ Mi[f]     if Mi[f] ≠ NA
+#                    i
+#
+#       Σ[f].τ_na  = Σ Mi[X.δT]  if Mi[f] = NA
+#                    i
+class ΣMeasurement(np.void):
+    _ = []
+    for name in Measurement._dtype.names:
+        typ = Measurement._dtype.fields[name][0].type
+        if not name.startswith('X.'):   # X.Tstart, X.δT
+            typ = np.dtype([('value', typ), ('τ_na', Measurement.Ttime)])
+        _.append((name, typ))
+    _dtype = np.dtype(_)
+    del _
+
+
 # ----------------------------------------
 # Measurement is the central part around which everything is organized.
 # Let's have it go first.
@@ -232,6 +255,23 @@ def __new__(cls):
         else:
             m[field][:] = NA(fdtype.base)   # subarray
     return m
+
+# ΣMeasurement() creates new ΣMeasurement instance.
+#
+# For all fields .value is initialized with NA and .τ_na with 0.
+@func(ΣMeasurement)
+def __new__(cls):
+    Σ = _newscalar(cls, cls._dtype)
+    for field in Σ.dtype.names:
+        fdtype = Σ.dtype.fields[field][0]
+        if fdtype.shape != ():              # skip subarrays - rely on aliases
+            continue
+        if field.startswith('X.'):          # X.Tstart, X.δT
+            Σ[field] = NA(fdtype)
+        else:
+            Σ[field]['value'] = NA(fdtype.fields['value'][0])
+            Σ[field]['τ_na']  = 0
+    return Σ
 
 
 # _all_qci expands <name>.QCI into <name>.sum and [] of <name>.<qci> for all possible qci values.
@@ -251,26 +291,26 @@ def _all_cause(name_cause: str): # -> name_sum, ()name_causev
     name = name_cause[:-len(".CAUSE")]
     return name+".sum", ()  # TODO add all possible CAUSEes - TS 36.331 (RRC)
 
-# expand all .QCI and .CAUSE in Measurement._dtype .
-def _():
+# expand all .QCI and .CAUSE in ._dtype of Measurement and ΣMeasurement.
+def _(Klass):
     # expand X.QCI -> X.sum  + X.QCI[nqci]
     qnamev = []  # X from X.QCI
     expv = []    # of (name, typ[, shape])
-    for name in Measurement._dtype .names:
-        typ   = Measurement._dtype .fields[name][0].type
+    for name in Klass._dtype .names:
+        dtyp   = Klass._dtype .fields[name][0]
         if name.endswith('.QCI'):
             _ = name[:-len('.QCI')]
             qnamev.append(_)
-            expv.append(('%s.sum' % _,  typ))        # X.sum
-            expv.append((name,          typ, nqci))  # X.QCI[nqci]
+            expv.append(('%s.sum' % _,  dtyp))        # X.sum
+            expv.append((name,          dtyp, nqci))  # X.QCI[nqci]
 
         elif name.endswith('.CAUSE'):
            Σ, causev = _all_cause(name)
            for _ in (Σ,)+causev:
-               expv.append((_, typ))
+               expv.append((_, dtyp))
 
         else:
-            expv.append((name, typ))
+            expv.append((name, dtyp))
 
     _dtype = np.dtype(expv)
 
@@ -292,14 +332,15 @@ def _():
             formatv.append(qarr.base)
             offsetv.append(off0 + qci*qarr.base.itemsize)
 
-    Measurement._dtype0 = _dtype  # ._dtype without aliases
-    Measurement._dtype  = np.dtype({
+    Klass._dtype0 = _dtype  # ._dtype without aliases
+    Klass._dtype  = np.dtype({
                             'names':   namev,
                             'formats': formatv,
                             'offsets': offsetv,
     })
-    assert Measurement._dtype.itemsize == Measurement._dtype0.itemsize
-_()
+    assert Klass._dtype.itemsize == Klass._dtype0.itemsize
+_(Measurement)
+_(ΣMeasurement)
 del _
 
 
@@ -655,6 +696,33 @@ def eutran_ip_throughput(calc): # -> IPThp[QCI][dl,ul]
             thp[qci]['ul']['hi'] = qulΣv[qci] / (qulΣt[qci] - qulΣte[qci])
 
     return thp
+
+
+# sum aggregates values of all Measurements in covered time interval.
+# TODO tests
+@func(Calc)
+def sum(calc): # -> ΣMeasurement
+    Σ = ΣMeasurement()
+    Σ['X.Tstart'] = calc.τ_lo
+    Σ['X.δT']     = calc.τ_hi - calc.τ_lo
+
+    for m in calc._miter():
+        for field in m.dtype.names:
+            if field.startswith('X.'):  # X.Tstart, X.δT
+                continue
+
+            v = m[field]
+            if v.shape != ():           # skip subarrays - rely on aliases
+                continue
+
+            if isNA(v):
+                Σ[field]['τ_na'] += m['X.δT']
+            else:
+                if isNA(Σ[field]['value']):
+                    Σ[field]['value'] = 0
+                Σ[field]['value'] += v
+
+    return Σ
 
 
 # _miter iterates through [.τ_lo, .τ_hi) yielding Measurements.
