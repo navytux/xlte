@@ -494,7 +494,7 @@ def _openwriter(path: str, rotatespec) -> IWriter:
 # _PlainWriter implements writer that emits data to plain file without rotation.
 class _PlainWriter(IWriter):
     def __init__(w, path):
-        w.f = open(path, "w")
+        w.f = open(path, "a")
 
     def writeline(w, line: str):
         w.f.write(line+'\n')
