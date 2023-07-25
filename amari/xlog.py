@@ -96,7 +96,7 @@ class LogSpec:
         spec.period = period
 
     def __str__(spec):
-        return "%s[%s]/%ss" % (spec.query, ','.join(spec.optv), spec.period)
+        return "%s[%s]/%gs" % (spec.query, ','.join(spec.optv), spec.period)
 
     # LogSpec.parse parses text into LogSpec.
     @staticmethod

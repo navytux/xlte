@@ -306,6 +306,7 @@ def test_LogSpec():
     assert spec.query == "stats"
     assert spec.optv == ["samples", "rf"]
     assert spec.period == 60.0
+    assert str(spec) == logspec
 
 
 def test_ReverseLineReader():
