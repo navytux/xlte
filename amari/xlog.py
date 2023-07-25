@@ -85,18 +85,24 @@ log = logging.getLogger('xlte.amari.xlog')
 # For example stats[rf]/10s.
 class LogSpec:
     # .query        e.g. 'stats'
-    # .optv         [] with flags to send with query
+    # .opts         {} opt -> value to send with query
     # .period       how often to issue the query (seconds)
 
     DEFAULT_PERIOD = 60
 
-    def __init__(spec, query, optv, period):
+    def __init__(spec, query, opts, period):
         spec.query  = query
-        spec.optv   = optv
+        spec.opts   = opts
         spec.period = period
 
     def __str__(spec):
-        return "%s[%s]/%gs" % (spec.query, ','.join(spec.optv), spec.period)
+        optv = []
+        for opt, val in spec.opts.items():
+            if val is True:
+                optv.append(opt)
+            else:
+                optv.append('%s=%s' % (opt, json.dumps(val)))
+        return "%s[%s]/%gs" % (spec.query, ','.join(optv), spec.period)
 
     # LogSpec.parse parses text into LogSpec.
     @staticmethod
@@ -104,7 +110,7 @@ class LogSpec:
         def bad(reason):
             raise ValueError("invalid logspec %s: %s" % (qq(text), reason))
 
-        optv = []
+        opts = {}
         period = LogSpec.DEFAULT_PERIOD
         query = text
         _ = query.rfind('/')
@@ -126,13 +132,19 @@ class LogSpec:
             if _ == -1:
                 bad("missing closing ]")
             optv = tail[1:_].split(',')
+            for opt in optv:
+                val = True
+                if '=' in opt:
+                    opt, val = opt.split('=', 1)
+                    val = json.loads(val)
+                opts[opt] = val
             tail = tail[_+1:]
 
         for c in '[]/ ':
             if c in query:
                 bad("invalid query")
 
-        return LogSpec(query, optv, period)
+        return LogSpec(query, opts, period)
 
 
 # IWriter represents output to where xlog writes its data.
@@ -166,10 +178,10 @@ def xlog(ctx, wsuri, w: IWriter, logspecv):
     logspecv = logspecv[:]  # keep caller's intact
     if lsync is None:
         isync = 0
-        lsync = LogSpec("meta.sync", [], pmax*10)
+        lsync = LogSpec("meta.sync", {}, pmax*10)
         logspecv.insert(0, lsync)
     if lconfig_get is None:
-        logspecv.insert(isync+1, LogSpec("config_get", [], lsync.period))
+        logspecv.insert(isync+1, LogSpec("config_get", {}, lsync.period))
 
     # verify that sync will come at least every LOS_window records
     ns = 0
@@ -354,10 +366,6 @@ class _XLogger:
             logspec = xl.logspecv[imin]
             tnextv[imin] += logspec.period
 
-            opts = {}
-            for opt in logspec.optv:
-                opts[opt] = True
-
             # issue queries with planned schedule
             # TODO detect time overruns and correct schedule correspondingly
             tnow = time.now()
@@ -382,7 +390,7 @@ class _XLogger:
                 xl.jemit_sync("attached", "periodic", isync)
 
             else:
-                t_rx, resp, resp_raw = req_(ctx, logspec.query, opts)
+                t_rx, resp, resp_raw = req_(ctx, logspec.query, logspec.opts)
                 srv_time = resp["time"]
                 srv_utc  = resp.get("utc")
                 xl.emit(resp_raw)

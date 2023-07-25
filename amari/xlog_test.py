@@ -300,11 +300,11 @@ def test_Reader_timestamp_from_sync_wo_utc():
 
 
 def test_LogSpec():
-    logspec = "stats[samples,rf]/60s"
+    logspec = 'stats[samples,rf,abc=123,def="hello world"]/60s'
     spec = xlog.LogSpec.parse(logspec)
 
     assert spec.query == "stats"
-    assert spec.optv == ["samples", "rf"]
+    assert spec.opts == {"samples": True, "rf": True, "abc": 123, "def": "hello world"}
     assert spec.period == 60.0
     assert str(spec) == logspec
 
