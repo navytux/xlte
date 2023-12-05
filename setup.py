@@ -90,6 +90,7 @@ setup(
                    'websocket-client',
                    'pygolang',
                    'numpy',
+                   'nrarfcn',
                   ],
 
     extras_require = {

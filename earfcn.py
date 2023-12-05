@@ -16,13 +16,13 @@
 #
 # See COPYING file for full licensing terms.
 # See https://www.nexedi.com/licensing for rationale and options.
-"""Package earfcn helps to do computations with LTE bands, frequencies and EARFCN numbers.
+"""Package xlte.earfcn helps to do computations with LTE bands, frequencies and EARFCN numbers.
 
 - frequency converts EARFCN to frequency.
 - dl2ul and ul2dl convert between DL EARFCN and UL EARFCN corresponding to each other.
 - band returns information about band to which EARFCN belongs.
 
-See also pypi.org/project/nrarfcn which provides similar functionality for 5G.
+See also package xlte.nrafcn and pypi.org/project/nrarfcn which provide similar functionality for 5G.
 """
 
 import collections
