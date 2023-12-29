@@ -81,8 +81,9 @@ nr = _()
 def dl2ul(dl_nr_arfcn, band): # -> ul_nr_arfcn
     dl_lo, dl_hi = nr.get_nrarfcn_range(band, 'dl')
     if dl_lo == 'N/A':
-        raise AssertionError('band%r does not have downlink spectrum' % band)
-    assert dl_lo <= dl_nr_arfcn <= dl_hi
+        raise ValueError('band%r does not have downlink spectrum' % band)
+    if not (dl_lo <= dl_nr_arfcn <= dl_hi):
+        raise ValueError('band%r: NR-ARFCN=%r is outside of downlink spectrum' % (band, dl_nr_arfcn))
     ul_lo, ul_hi = nr.get_nrarfcn_range(band, 'ul')
     if ul_lo == 'N/A':
         raise KeyError('band%r, to which DL NR-ARFCN=%r belongs, does not have uplink spectrum' % (band, dl_nr_arfcn))
@@ -96,8 +97,9 @@ def dl2ul(dl_nr_arfcn, band): # -> ul_nr_arfcn
 def ul2dl(ul_nr_arfcn, band): # -> dl_nr_arfcn
     ul_lo, ul_hi = nr.get_nrarfcn_range(band, 'ul')
     if ul_lo == 'N/A':
-        raise AssertionError('band%r does not have uplink spectrum' % band)
-    assert ul_lo <= ul_nr_arfcn <= ul_hi
+        raise ValueError('band%r does not have uplink spectrum' % band)
+    if not (ul_lo <= ul_nr_arfcn <= ul_hi):
+        raise ValueError('band%r: NR-ARFCN=%r is outside of uplink spectrum' % (band, ul_nr_arfcn))
     dl_lo, dl_hi = nr.get_nrarfcn_range(band, 'dl')
     if dl_lo == 'N/A':
         raise KeyError('band%r, to which UL NR-ARFCN=%r belongs, does not have downlink spectrum' % (band, ul_nr_arfcn))
@@ -114,13 +116,15 @@ def ul2dl(ul_nr_arfcn, band): # -> dl_nr_arfcn
 # for return (Fdl - Fssb) is aligned with some SSB SubCarrier Spacing of given band.
 # max_ssb_scs_khz indicates max SSB SubCarrier Spacing for which it was possible to find Fssb constrained with above alignment requirement.
 #
-# ValueError is raised if Fssb is not possible to find for given Fdl and band.
+# KeyError   is raised if Fssb is not possible to find for given Fdl and band.
+# ValueError is raised if input parameters are incorrect.
 def dl2ssb(dl_nr_arfcn, band): # -> ssb_nr_arfcn, max_ssb_scs_khz
     _trace('\ndl2ssb %r %r' % (dl_nr_arfcn, band))
     dl_lo, dl_hi = nr.get_nrarfcn_range(band, 'dl')
     if dl_lo == 'N/A':
-        raise AssertionError('band%r does not have downlink spectrum' % band)
-    assert dl_lo <= dl_nr_arfcn <= dl_hi
+        raise ValueError('band%r does not have downlink spectrum' % band)
+    if not (dl_lo <= dl_nr_arfcn <= dl_hi):
+        raise ValueError('band%r: NR-ARFCN=%r is outside of downlink spectrum' % (band, dl_nr_arfcn))
 
     f = frequency(nrarfcn=dl_nr_arfcn)
     _trace('f   %.16g' % f)
@@ -159,7 +163,7 @@ def dl2ssb(dl_nr_arfcn, band): # -> ssb_nr_arfcn, max_ssb_scs_khz
                 return f_sync_arfcn, scs_khz
             gscn += (+1 if δf > 0  else  -1)
 
-    raise ValueError('dl2ssb %r %s: cannot find SSB frequency that is both on GSR and aligns from dl modulo SSB SCS of the given band' % (dl_nr_arfcn, band))
+    raise KeyError('dl2ssb %r %s: cannot find SSB frequency that is both on GSR and aligns from dl modulo SSB SCS of the given band' % (dl_nr_arfcn, band))
 
 
 # frequency returns frequency corresponding to DL or UL NR-ARFCN.

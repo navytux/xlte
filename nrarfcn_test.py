@@ -86,5 +86,22 @@ def test_nrarfcn():
     _(263, 2679991, 2679991, 64049.52, 64049.52,  'TDD', 2679931, 120)  # FR2-2  % 480khz ≠ 0
 
     # some dl points not on ΔFraster -> ssb cannot be found
-    _( 78,  632629,  632629,  3489.435, 3489.435, 'TDD', ValueError, None)
-    _(257, 2079168, 2079168, 28000.14, 28000.14,  'TDD', ValueError, None)
+    _( 78,  632629,  632629,  3489.435, 3489.435, 'TDD', KeyError, None)
+    _(257, 2079168, 2079168, 28000.14, 28000.14,  'TDD', KeyError, None)
+
+
+    # error in input parameters -> ValueError
+    def edl(band, dl_nr_arfcn, estr):
+        for f in (dl2ul, dl2ssb):
+            with raises(ValueError, match=estr):
+                f(dl_nr_arfcn, band)
+    def eul(band, ul_nr_arfcn, estr):
+        for f in (ul2dl,):
+            with raises(ValueError, match=estr):
+                f(ul_nr_arfcn, band)
+    # no x spectrum when requesting x2y
+    edl(80, 10000, 'band80 does not have downlink spectrum')    # SUL
+    eul(29, 10000, 'band29 does not have uplink spectrum')      # SDL
+    # mismatch between x_nr_arfcn and band
+    edl( 1, 10000, 'band1: NR-ARFCN=10000 is outside of downlink spectrum')
+    eul( 1, 10000, 'band1: NR-ARFCN=10000 is outside of uplink spectrum')
