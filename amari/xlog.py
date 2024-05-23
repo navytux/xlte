@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+# Copyright (C) 2022-2024  Nexedi SA and Contributors.
 #                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
@@ -156,10 +156,10 @@ class IWriter:
     rotatespec =                "rotatespec indicates rotate specification of the writer"
 
 
-# xlog queries service @wsuri periodically according to queries specified by
+# xlog queries service @wsuri/opts periodically according to queries specified by
 # logspecv and logs the result.
 @func
-def xlog(ctx, wsuri, w: IWriter, logspecv):
+def xlog(ctx, wsuri, opts, w: IWriter, logspecv):
     # make sure we always have meta.sync - either the caller specifies it
     # explicitly, or we add it automatically to come first with default
     # 10x·longest periodicity. Do the same about config_get - by default we
@@ -192,7 +192,7 @@ def xlog(ctx, wsuri, w: IWriter, logspecv):
             "which is > LOS_window (%d)" % (ns, LOS_window))
 
     # ready to start logging
-    xl = _XLogger(wsuri, w, logspecv, lsync.period)
+    xl = _XLogger(wsuri, opts, w, logspecv, lsync.period)
 
     # emit sync at start/stop
     xl.jemit_sync("detached", "start", {})
@@ -224,8 +224,9 @@ def xlog(ctx, wsuri, w: IWriter, logspecv):
 
 # _XLogger serves xlog implementation.
 class _XLogger:
-    def __init__(xl, wsuri, w, logspecv, δt_sync):
+    def __init__(xl, wsuri, opts, w, logspecv, δt_sync):
         xl.wsuri    = wsuri
+        xl.opts     = opts
         xl.w        = w
         xl.logspecv = logspecv
         xl.δt_sync  = δt_sync       # = logspecv.get("meta.sync").period
@@ -278,7 +279,7 @@ class _XLogger:
 
         # connect to the service
         try:
-            conn = amari.connect(ctx, xl.wsuri)
+            conn = amari.connect(ctx, xl.wsuri, xl.opts.get('password'))
         except Exception as ex:
             xl.jemit("service connect failure", {"reason": str(ex)})
             if not isinstance(ex, amari.ConnError):
@@ -296,7 +297,7 @@ class _XLogger:
                     "srv_version": conn.srv_version}
         srv_iattach = srv_info.copy()
         for k, v in conn.srv_ready_msg.items():
-            if k in {"message", "type", "name", "version"}:
+            if k in {"message", "type", "name", "version", "challenge"}:
                 continue
             srv_iattach["srv_"+k] = v
         xl.jemit("service attach", srv_iattach)
@@ -921,6 +922,7 @@ Additionally the following queries are used to control xlog itself:
 
 Options:
 
+        --password <password>   use specified password if service requires authentication
         --rotate <rotatespec>   rotate output approximately according to rotatespec
                                 rotatespec is <X>(KB|MB|GB|sec|min|hour|day)[.nbackup]
     -h  --help                  show this help
@@ -932,14 +934,17 @@ file=out)
 
 def main(ctx, argv):
     try:
-        optv, argv = getopt.getopt(argv[1:], "h", ["rotate=", "help"])
+        optv, argv = getopt.getopt(argv[1:], "h", ["password=", "rotate=", "help"])
     except getopt.GetoptError as e:
         print(e, file=sys.stderr)
         usage(sys.stderr)
         sys.exit(2)
 
+    opts = {}
     rotatespec = None
     for opt, arg in optv:
+        if opt in (      "--password"):
+            opts["password"] = arg
         if opt in (      "--rotate"):
             rotatespec = arg
 
@@ -958,4 +963,4 @@ def main(ctx, argv):
         logspecv.append( LogSpec.parse(arg) )
 
     w = _openwriter(output, rotatespec)
-    xlog(ctx, wsuri, w, logspecv)
+    xlog(ctx, wsuri, opts, w, logspecv)
