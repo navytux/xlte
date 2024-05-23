@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+# Copyright (C) 2022-2024  Nexedi SA and Contributors.
 #                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
@@ -26,7 +26,8 @@ from __future__ import print_function, division, absolute_import
 
 import websocket
 import json
-from golang import chan, select, nilchan, func, defer, panic
+import hmac
+from golang import chan, select, nilchan, func, defer, panic, b
 from golang import context, sync, time
 
 
@@ -47,7 +48,9 @@ class ConnClosedError(ConnError):
 
 
 # connect connects to a service via WebSocket.
-def connect(ctx, wsuri):  # -> Conn
+#
+# The password is used if the service requires authentication.
+def connect(ctx, wsuri, password=None):  # -> Conn
     #websocket.enableTrace(True)     # TODO on $XLTE_AMARI_WS_DEBUG=y ?
     ws = websocket.WebSocket()
     ws.settimeout(5)  # reasonable default
@@ -56,7 +59,7 @@ def connect(ctx, wsuri):  # -> Conn
         ws.connect(wsuri)
     except Exception as ex:
         raise ConnError("connect") from ex
-    return Conn(ws, wsuri)
+    return Conn(ws, wsuri, password)
 
 # Conn represents WebSocket connection to a service.
 #
@@ -65,8 +68,8 @@ def connect(ctx, wsuri):  # -> Conn
 class Conn:
     # .wsuri            websocket uri of the service
     # ._ws              websocket connection to service
-    # .srv_ready_msg    message we got for "ready"
-    # .t_srv_ready_msg  timestamp of "ready" reception
+    # .srv_ready_msg    message we got for "ready" or initial "authenticate"
+    # .t_srv_ready_msg  timestamp of "ready" / initial "authenticate" reception
 
     # ._mu              sync.Mutex
     # ._rxtab           {} msgid -> (request, rx channel)  | None
@@ -76,13 +79,29 @@ class Conn:
     # ._rx_wg           sync.WorkGroup for spawned _serve_recv
     # ._down_once       sync.Once
 
-    def __init__(conn, ws, wsuri):
+    def __init__(conn, ws, wsuri, password):
+        # initial handshake - see https://tech-academy.amarisoft.com/lteenb.doc#Startup
         try:
             msg0_raw = ws.recv()
             t_msg0 = time.now()
             msg0 = json.loads(msg0_raw)
-            # TODO also support 'authenticate'
-            if msg0['message'] != 'ready':
+
+            if msg0['message'] == 'ready':
+                pass
+            elif msg0['message'] == 'authenticate':
+                if password is None:
+                    raise ValueError("service requires authentication, but no password provided")
+                res = '%s:%s:%s' % (msg0['type'], password, msg0['name'])
+                res = hmac.new(b(res), b(msg0['challenge']), 'sha256')
+                res = res.hexdigest()
+                ws.send(json.dumps({'message': 'authenticate', 'res': res}))
+                auth_ack_raw = ws.recv()
+                auth_ack = json.loads(auth_ack_raw)
+                if auth_ack['message'] != 'authenticate':
+                    raise ValueError("unexpected authenticate reply: %s" % auth_ack)
+                if auth_ack.get('ready') != True:
+                    raise ValueError("authentication failure: %s" % auth_ack['error'])
+            else:
                 raise ValueError("unexpected welcome message: %s" % msg0)
         except Exception as ex:
             ws.close()
