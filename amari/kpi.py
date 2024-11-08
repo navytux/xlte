@@ -480,9 +480,9 @@ def _drb_update(m: kpi.Measurement, drb_stats: xlog.Message):
             ΣT_hi   = ΣT + ΣT_err
             ΣTT_lo  = ΣTT - ΣTT_err
 
-            qvol[qci]      = 8*ΣB   # in bits
-            qtime[qci]     = (ΣT_hi + ΣTT_lo) / 2
-            qtime_err[qci] = (ΣT_hi - ΣTT_lo) / 2
+            qvol[qci]      += 8*ΣB   # in bits
+            qtime[qci]     += (ΣT_hi + ΣTT_lo) / 2
+            qtime_err[qci] += (ΣT_hi - ΣTT_lo) / 2
 
 
 # LogError(timestamp|None, *argv).

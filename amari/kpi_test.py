@@ -104,12 +104,13 @@ class tLogMeasure:
             # also automatically initialize XXX.DRB.IPTimeX_err to 0.01 upon seeing DRB.IPTimeX
             # ( in tests we use precise values for tx_time and tx_time_notailtti
             #   with δ=0.02 - see drb_trx and jdrb_stats)
+            # this pre-initialization is correct only if there was single x.drb_stats message.
             n = _.group(1)
             if n.startswith('DRB.IPTime'):
                 ferr = "XXX.%s_err" % n
                 if isNA(t._mok[ferr+'.QCI']).all():
                     t._mok[ferr+'.QCI'][:] = 0
-                t._mok["%s.%s" % (ferr, _.group(2))] = ((vok + 0.01) - (vok - 0.01)) / 2  # ≈ 0.01
+                t._mok["%s.%s" % (ferr, _.group(2))] = drb_terr(vok)
 
         t._mok[field] = vok
 
@@ -360,6 +361,15 @@ def test_LogMeasure():
     _('S1SIG.ConnEstabSucc',        2)
     _('ERAB.EstabInitAttNbr.sum',   3) # currently same as S1SIG.ConnEstab
     _('ERAB.EstabInitSuccNbr.sum',  2) # ----//----
+
+    tdrb_stats(+0.5, {9: drb_trx(9.1,91,    9.2,92)})       # multiple d are accumulated
+    tdrb_stats(+0.6, {9: drb_trx(0.2, 2,    1.2,12)})       # ─d·S──ddd─S──
+    tdrb_stats(+0.7, {9: drb_trx(0.3, 3,    1.3,13)})       #   cont↑
+    tδstats({})
+    _('DRB.IPTimeDl.9', 9.1+0.2+0.3);   _('DRB.IPVolDl.9', 8*(91+2+3))
+    _('DRB.IPTimeUl.9', 9.2+1.2+1.3);   _('DRB.IPVolUl.9', 8*(92+12+13))
+    t._mok['XXX.DRB.IPTimeDl_err.9'] = drb_terr(9.1) + drb_terr(0.2) + drb_terr(0.3)
+    t._mok['XXX.DRB.IPTimeUl_err.9'] = drb_terr(9.2) + drb_terr(1.2) + drb_terr(1.3)
 
 
     # service detach/attach, connect failure, xlog failure
@@ -671,6 +681,14 @@ def drb_trx(dl_tx_time, dl_tx_bytes, ul_tx_time, ul_tx_bytes):
     return {"dl_tx_bytes": dl_tx_bytes, "dl_tx_time": dl_tx_time + 0.01, "dl_tx_time_notailtti": dl_tx_time - 0.01,
             "ul_tx_bytes": ul_tx_bytes, "ul_tx_time": ul_tx_time + 0.01, "ul_tx_time_notailtti": ul_tx_time - 0.01}
 
+
+# drb_terr returns what XXX.DRB.IPTimeX_err should be for given DRB.IPTimeX
+# it is ≈ 0.01 but due to loss of float-point precision is a bit different for
+# particular value of time.
+# ( in tests we use precise values for tx_time and tx_time_notailtti
+#   with δ=0.02 - see drb_trx and jdrb_stats)
+def drb_terr(t):
+    return ((t + 0.01) - (t - 0.01)) / 2  # ≈ 0.01
 
 # ionone returns empty data source.
 def ionone():
