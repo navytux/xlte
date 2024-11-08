@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2023  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2023-2024  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -334,6 +334,13 @@ def _update_qci_flows(ue, bitnext, qci_samples):
     for (δt, tx_bytes, tx, u) in bitnext:
         qflows_live = set()  # of qci       qci flows that get updated from current utx entry
 
+        # estimate time for current transmission
+        # normalize transport blocks to time in TTI units (if it is e.g.
+        # 2x2 mimo, we have 2x more transport blocks).
+        δt_tti = δt / tti
+        tx /= u.rank
+        tx = min(tx, δt_tti)            # protection (should not happen)
+
         # it might happen that even with correct bitsync we could end up with receiving tx=0 here.
         # for example it happens if finish interrupts proper bitsync workflow e.g. as follows:
         #
@@ -344,9 +351,21 @@ def _update_qci_flows(ue, bitnext, qci_samples):
         # if we see #tx = 0 we say that it might be anything in between 1 and δt.
         tx_lo = tx_hi = tx
         if tx == 0:
-            tx_hi = δt/tti
+            tx_hi = δt_tti
             tx_lo = min(1, tx_hi)
 
+        # tx time on the cell is somewhere in [tx, δt_tti]
+        if u.xl_use_avg < 0.9:
+            # not congested: it likely took the time to transmit ≈ tx
+            pass
+        else:
+            # potentially congested: we don't know how much congested it is and
+            # which QCIs are affected more and which less
+            # -> all we can say tx_time is only somewhere in between limits
+            tx_hi = δt_tti
+
+
+        # share/distribute tx time over all QCIs.
         for qci, tx_bytes_qci in u.qtx_bytes.items():
             qflows_live.add(qci)
 
@@ -354,8 +373,6 @@ def _update_qci_flows(ue, bitnext, qci_samples):
             if qf is None:
                 qf = ue.qci_flows[qci] = _QCI_Flow()
 
-            # share/distribute #tx transport blocks over all QCIs.
-            #
             # Consider two streams "x" and "o" and how LTE scheduler might
             # place them into resource map: if the streams have the same
             # priority they might be scheduled e.g. as shown in case "a".
@@ -387,7 +404,7 @@ def _update_qci_flows(ue, bitnext, qci_samples):
             if qtx_lo > tx_hi:  # e.g. 6.6 * 11308 / 11308 = 6.6 + ~1e-15
                 qtx_lo -= 1e-4
             assert 0 < qtx_lo <= tx_hi, (qtx_lo, tx_hi, tx_bytes_qci, tx_bytes)
-            _ = qf.update(δt, tx_bytes_qci, qtx_lo, tx_hi, u.rank, u.xl_use_avg)
+            _ = qf.update(δt, tx_bytes_qci, qtx_lo, tx_hi)
             for sample in _:
                 qci_samples.setdefault(qci, []).append(sample)
 
@@ -407,39 +424,22 @@ def __init__(qf):
     qf.tx_time_err = 0
 
 # update updates flow with information that so many bytes were transmitted during
-# δt with using #tx transport blocks somewhere in [tx_lo,tx_hi] and with
-# specified rank. It is also known that overall average usage of resource
-# blocks corresponding to tx direction in the resource map is xl_use_avg.
+# δt with using tx transmission time somewhere in [tx_lo,tx_hi].
 @func(_QCI_Flow)
-def update(qf, δt, tx_bytes, tx_lo, tx_hi, rank, xl_use_avg):  # -> []Sample
-    #_debug('QF.update %.2ftti %5db %.1f-%.1ftx %drank %.2fuse' % (δt/tti, tx_bytes, tx_lo, tx_hi, rank, xl_use_avg))
-
-    tx_lo /= rank # normalize TB to TTI (if it is e.g. 2x2 mimo, we have 2x more transport blocks)
-    tx_hi /= rank
+def update(qf, δt, tx_bytes, tx_lo, tx_hi):  # -> []Sample
+    #_debug('QF.update %.2ftti %5db %.1f-%.1ftx' % (δt/tti, tx_bytes, tx_lo, tx_hi))
 
     vout = []
-    s = qf._update(δt, tx_bytes, tx_lo, tx_hi, xl_use_avg)
+    s = qf._update(δt, tx_bytes, tx_lo, tx_hi)
     if s is not None:
         vout.append(s)
     return vout
 
 @func(_QCI_Flow)
-def _update(qf, δt, tx_bytes, tx_lo, tx_hi, xl_use_avg): # -> ?Sample
+def _update(qf, δt, tx_bytes, tx_lo, tx_hi): # -> ?Sample
     assert tx_bytes > 0
     δt_tti = δt / tti
 
-    tx_lo = min(tx_lo, δt_tti)  # protection (should not happen)
-    tx_hi = min(tx_hi, δt_tti)  # protection (should not happen)
-
-    # tx time is somewhere in [tx, δt_tti]
-    if xl_use_avg < 0.9:
-        # not congested: it likely took the time to transmit ≈ #tx
-        pass
-    else:
-        # potentially congested: we don't know how much congested it is and
-        # which QCIs are affected more and which less
-        # -> all we can say tx_time is only somewhere in between limits
-        tx_hi = δt_tti
     tx_time     = (tx_lo + tx_hi) / 2 * tti
     tx_time_err = (tx_hi - tx_lo) / 2 * tti
 
