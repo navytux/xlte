@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2023  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2023-2024  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -20,7 +20,7 @@
 
 from __future__ import print_function, division, absolute_import
 
-from xlte.amari.drb import _Sampler, Sample, _BitSync, tti, _IncStats
+from xlte.amari.drb import _Sampler, Sample, _BitSync, _Utx, tti, _IncStats
 import numpy as np
 from golang import func
 
@@ -360,22 +360,31 @@ def test_BitSync():
     def _(*txv_in):
         def do_bitsync(*txv_in):
             txv_out = []
-            xv_out  = ''
+            xv_out  = []
             bitsync = _BitSync()
             for x, (tx_bytes, tx) in enumerate(txv_in):
-                _ =  bitsync.next(10*tti, tx_bytes, tx,
-                                  chr(ord('a')+x))
-                for (δt, tx_bytes, tx, x_) in _:
+                u = _Utx()
+                u.qtx_bytes = None  # bitsync itself does not use .qtx_bytes
+                u.tx   = tx
+                u.retx = 0
+                u.rank = 1
+                u.xl_use_avg = 0.1
+                u.qtx_bytes = x # XXX hack - see ^^^
+                _ =  bitsync.next(10*tti, tx_bytes, u)
+                for (δt, tx_bytes, u_) in _:
                     assert δt == 10*tti
-                    txv_out.append((tx_bytes, tx))
-                    xv_out += x_
+                    assert u_.retx == 0
+                    txv_out.append((tx_bytes, u_.tx))
+                    xv_out .append(u_.qtx_bytes)
 
             _ = bitsync.finish()
-            for (δt, tx_bytes, tx, x_) in _:
+            for (δt, tx_bytes, u_) in _:
                 assert δt == 10*tti
-                txv_out.append((tx_bytes, tx))
-                xv_out += x_
+                assert u_.retx == 0
+                txv_out.append((tx_bytes, u_.tx))
+                xv_out .append(u_.qtx_bytes)
 
+            xv_out = ''.join(chr(ord('a')+_) for _ in xv_out)
             assert xv_out == 'abcdefghijklmnopqrstuvwxyz'[:len(txv_in)]
             return txv_out
 

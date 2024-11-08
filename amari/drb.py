@@ -141,13 +141,13 @@ class _QCI_Flow:
 # adjusted stream with #tx corresponding to tx_bytes coming together
 # synchronized in time.
 #
-#   .next(δt, tx_bytes, #tx, X)  ->  [](δt', tx_bytes', #tx', X')
-#   .finish()                    ->  [](δt', tx_bytes', #tx', X')
+#   .next(δt, tx_bytes, #tx)  ->  [](δt', tx_bytes', #tx')
+#   .finish()                 ->  [](δt', tx_bytes', #tx')
 #
 # (*) see e.g. Figure 8.1 in "An introduction to LTE, 2nd ed."
 class _BitSync:
     __slots__ = (
-        'txq',          # [](δt,tx_bytes,#tx,X)     not-yet fully processed tail of whole txv
+        'txq',          # [](δt,tx_bytes,_Utx)      not-yet fully processed tail of whole txv
         'i_txq',        # txq represents txv[i_txq:]
         'i_lshift',     # next left shift will be done on txv[i_lshift] <- txv[i_lshift+1]
     )
@@ -221,9 +221,11 @@ def add(s, ue_stats, stats):  # -> dl/ul samples    ; dl/ul = {} qci -> []Sample
     ul = s._ul_sampler.add(ue_stats, stats)
     return dl, ul
 
-class _Utx:  # transmission state passed through bitsync
+class _Utx:  # UE transmission state
     __slots__ = (
         'qtx_bytes',
+        'tx',
+        'retx',
         'rank',
         'xl_use_avg',
     )
@@ -247,15 +249,17 @@ def add(s, ue_stats, stats, init=False):
             raise RuntimeError(("ue #%s belongs to %d cells;  "+
                 "but only single-cell configurations are supported") % (ue_id, len(ju(['cells']))))
         cell = ju['cells'][0]
-        tx   = cell['%s_tx'   % s.dir]  # in transport blocks
-        retx = cell['%s_retx' % s.dir]  # ----//----
-        assert tx   >= 0, tx
-        assert retx >= 0, retx
 
         cell_id = cell['cell_id']  # int
         scell = stats['cells'][str(cell_id)]
 
         u = _Utx()
+
+        u.tx   = cell['%s_tx'   % s.dir]  # in transport blocks
+        u.retx = cell['%s_retx' % s.dir]  # ----//----
+        assert u.tx   >= 0, u.tx
+        assert u.retx >= 0, u.retx
+
         u.qtx_bytes  = {}  # qci -> Σδerab_qci=qci
         u.rank       = cell['ri']  if s.use_ri  else 1
         u.xl_use_avg = scell['%s_use_avg' % s.dir]
@@ -292,22 +296,21 @@ def add(s, ue_stats, stats, init=False):
                 u.qtx_bytes[qci] = u.qtx_bytes.get(qci,0) + etx_bytes
 
             # debug
-            if 0  and  s.dir == 'dl'  and  (etx_bytes != 0 or tx != 0 or retx != 0)  and qci==9:
+            if 0  and  s.dir == 'dl'  and  (etx_bytes != 0 or u.tx != 0 or u.retx != 0)  and qci==9:
                 sfnx = ((t // tti) / 10) % 1024  # = SFN.subframe
                 _debug('% 4.1f ue%s %s .%d: etx_total_bytes: %d  +%5d  tx: %2d  retx: %d  ri: %d  bitrate: %d' % \
-                        (sfnx, ue_id, s.dir, qci, etx_total_bytes, etx_bytes, tx, retx, u.rank, cell['%s_bitrate' % s.dir]))
+                        (sfnx, ue_id, s.dir, qci, etx_total_bytes, etx_bytes, u.tx, u.retx, u.rank, cell['%s_bitrate' % s.dir]))
 
         # gc non-live erabs
         for erab_id in set(ue.erab_flows.keys()):
             if erab_id not in eflows_live:
                 del ue.erab_flows[erab_id]
 
-        # bitsync <- (δt, tx_bytes, #tx, u)
-        tx += retx # both transmission and retransmission take time
+        # bitsync <- (δt, tx_bytes, u)
         if ue.bitsync is not None:
-            bitnext = ue.bitsync.next(δt, tx_bytes, tx, u)
+            bitnext = ue.bitsync.next(δt, tx_bytes, u)
         else:
-            bitnext = [(δt, tx_bytes, tx, u)]
+            bitnext = [(δt, tx_bytes, u)]
 
         # update qci flows
         if init:
@@ -326,19 +329,19 @@ def add(s, ue_stats, stats, init=False):
     return qci_samples
 
 
-# _update_qci_flows updates .qci_flows for ue with (δt, tx_bytes, #tx, _Utx) yielded from bitsync.
+# _update_qci_flows updates .qci_flows for ue with (δt, tx_bytes, _Utx) yielded from bitsync.
 #
 # yielded samples are appended to qci_samples  ({} qci -> []Sample).
 @func(_UE)
 def _update_qci_flows(ue, bitnext, qci_samples):
-    for (δt, tx_bytes, tx, u) in bitnext:
+    for (δt, tx_bytes, u) in bitnext:
         qflows_live = set()  # of qci       qci flows that get updated from current utx entry
 
         # estimate time for current transmission
         # normalize transport blocks to time in TTI units (if it is e.g.
         # 2x2 mimo, we have 2x more transport blocks).
         δt_tti = δt / tti
-        tx /= u.rank
+        tx = (u.tx + u.retx) / u.rank   # both transmission and retransmission take time
         tx = min(tx, δt_tti)            # protection (should not happen)
 
         # it might happen that even with correct bitsync we could end up with receiving tx=0 here.
@@ -498,12 +501,16 @@ def __init__(s):
     s.i_txq     = 0
     s.i_lshift  = 0
 
-# next feeds next (δt, tx_bytes, tx) into bitsync.
+# next feeds next (δt, tx_bytes, _Utx) into bitsync.
 #
 # and returns ready parts of adjusted stream.
 @func(_BitSync)
-def next(s, δt, tx_bytes, tx, X): # -> [](δt', tx_bytes', tx', X')
-    s.txq.append((δt, tx_bytes, tx, X))
+def next(s, δt, tx_bytes, u: _Utx): # -> [](δt', tx_bytes', u')
+    s.txq.append((δt, tx_bytes, u))
+
+    # move all time to .tx
+    u.tx   += u.retx
+    u.retx  = 0
 
     # XXX for simplicity we currently handle sync in between only current and
     # next frames. That is enough to support FDD. TODO handle next-next case to support TDD
@@ -537,8 +544,8 @@ def next(s, δt, tx_bytes, tx, X): # -> [](δt', tx_bytes', tx', X')
         assert s.i_txq <= i < s.i_txq + len(s.txq)
         i -= s.i_txq
 
-        δt1, b1, t1, X1 = s.txq[i]
-        δt2, b2, t2, X2 = s.txq[i+1]
+        δt1, b1, u1 = s.txq[i];     t1 = u1.tx
+        δt2, b2, u2 = s.txq[i+1];   t2 = u2.tx
         if b1 != 0:
             t22 = b2*t1/b1
         else:
@@ -551,8 +558,10 @@ def next(s, δt, tx_bytes, tx, X): # -> [](δt', tx_bytes', tx', X')
             assert t1 >= 0, t1
             assert t2 >= 0, t2
 
-        s.txq[i]   = (δt1, b1, t1, X1)
-        s.txq[i+1] = (δt2, b2, t2, X2)
+        u1.tx = t1
+        u2.tx = t2
+        s.txq[i]   = (δt1, b1, u1)
+        s.txq[i+1] = (δt2, b2, u2)
         #print('  < lshift  ', s.txq)
 
     while s.i_lshift+1 < s.i_txq + len(s.txq):
@@ -578,7 +587,7 @@ def next(s, δt, tx_bytes, tx, X): # -> [](δt', tx_bytes', tx', X')
 #
 # the bitsync becomes reset.
 @func(_BitSync)
-def finish(s): # -> [](δt', tx_bytes', tx', X')
+def finish(s): # -> [](δt', tx_bytes', tx')
     assert len(s.txq) < 3
     s._rebalance(len(s.txq))
     vout = s.txq
@@ -610,13 +619,14 @@ def _rebalance(s, l):
     assert l <= 3
 
     Σb = sum(_[1] for _ in s.txq[:l])
-    Σt = sum(_[2] for _ in s.txq[:l])
+    Σt = sum(_[2].tx for _ in s.txq[:l])
     if Σb != 0:
         for i in range(l):
-            δt_i, b_i, t_i, X_i = s.txq[i]
+            δt_i, b_i, u_i = s.txq[i];  t_i = u_i.tx
             t_i = b_i * Σt / Σb
             assert t_i >= 0, t_i
-            s.txq[i] = (δt_i, b_i, t_i, X_i)
+            u_i.tx = t_i
+            s.txq[i] = (δt_i, b_i, u_i)
     #print('  < rebalance', s.txq[:l])
 
 
