@@ -912,6 +912,15 @@ def __repr__(s):
     return "Sample(%db, %.1f ±%.1ftti)\t# %.0f ±%.0f bit/s" % \
             (s.tx_bytes, s.tx_time/tti, s.tx_time_err/tti, div(s.tx_bytes*8, s.tx_time), (b_hi - b_lo)/2)
 
+# __repr__ returns human-readable representation of _Utx and _UCtx.
+@func(_Utx)
+def __repr__(u):
+    return "Utx(qtx_bytes: %r,  cutx: %r)" % (u.qtx_bytes, u.cutx)
+@func(_UCtx)
+def __repr__(uc):
+    return "UCtx(%dt, %dr, %.0f bit/s, %dri, %.2f use  |  %r tx_bytes)" % \
+           (uc.tx, uc.retx, uc.bitrate, uc.rank, uc.xl_use_avg, uc.tx_bytes)
+
 
 # ----------------------------------------
 
