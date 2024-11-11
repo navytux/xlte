@@ -277,32 +277,29 @@ def add(s, ue_stats, stats, init=False):
         ue_id = ju['enb_ue_id']    # TODO 5G: -> ran_ue_id + qos_flow_list + sst?
         ue_live.add(ue_id)
 
-        if len(ju['cells']) != 1:
-            raise RuntimeError(("ue #%s belongs to %d cells;  "+
-                "but only single-cell configurations are supported") % (ue_id, len(ju(['cells']))))
-        cell = ju['cells'][0]
-
-        cell_id = cell['cell_id']  # int
-        scell = stats['cells'][str(cell_id)]
-
         u = _Utx()
         u.qtx_bytes  = {}  # qci  -> Σδerab_qci=qci
         u.cutx       = {}  # cell -> _UCtx
 
-        uc = _UCtx()
-        u.cutx[cell_id] = uc
+        for ucell in ju['cells']:
+            cell_id = ucell['cell_id']  # int
+            stats_cell = stats['cells'][str(cell_id)]
 
-        uc.tx       = cell['%s_tx'   % s.dir]     # in transport blocks
-        uc.retx     = cell['%s_retx' % s.dir]     # ----//----
-        uc.bitrate  = cell['%s_bitrate' % s.dir]  # bits/s
-        assert uc.tx      >= 0, uc.tx
-        assert uc.retx    >= 0, uc.retx
-        assert uc.bitrate >= 0, uc.bitrate
+            uc = _UCtx()
+            assert cell_id not in u.cutx,  u.cutx
+            u.cutx[cell_id] = uc
 
-        uc.rank       = cell['ri']  if s.use_ri  else 1
-        uc.xl_use_avg = scell['%s_use_avg' % s.dir]
+            uc.tx       = ucell['%s_tx'      % s.dir]  # in transport blocks
+            uc.retx     = ucell['%s_retx'    % s.dir]  # ----//----
+            uc.bitrate  = ucell['%s_bitrate' % s.dir]  # bits/s
+            assert uc.tx      >= 0, uc.tx
+            assert uc.retx    >= 0, uc.retx
+            assert uc.bitrate >= 0, uc.bitrate
 
-        uc.tx_bytes = None
+            uc.rank       = ucell['ri']  if s.use_ri  else 1
+            uc.xl_use_avg = stats_cell['%s_use_avg' % s.dir]
+
+            uc.tx_bytes = None
 
         ue = s.ues.get(ue_id)
         if ue is None:
@@ -339,11 +336,16 @@ def add(s, ue_stats, stats, init=False):
             if 0  and                   \
                s.dir == 'dl'  and  (    \
                  etx_bytes != 0 or      \
-                 uc.tx != 0 or uc.retx != 0 or uc.bitrate != 0      \
+                 any([(uc.tx != 0 or uc.retx != 0 or uc.bitrate != 0)  for uc in u.cutx.values()])   \
                )  and qci==9:
                 sfnx = ((t // tti) / 10) % 1024  # = SFN.subframe
-                _debug('% 4.1f ue%s %s .%d: etx_total_bytes: %d  +%5d  tx: %2d  retx: %d  ri: %d  bitrate: %d' % \
-                        (sfnx, ue_id, s.dir, qci, etx_total_bytes, etx_bytes, uc.tx, uc.retx, uc.rank, uc.bitrate))
+                dtx  = '% 4.1f ue%s %s .%d: etx_total_bytes: %d  +%5d' % \
+                       (sfnx, ue_id, s.dir, qci, etx_total_bytes, etx_bytes)
+                for cell_id in sorted(u.cutx):
+                    uc = u.cutx[cell_id]
+                    dtx += '|  C%d:  tx %2d  retx %d  ri %d  bitrate %d' % \
+                           (cell_id, uc.tx, uc.retx, uc.rank, uc.bitrate)
+                _debug(dtx)
 
         # gc non-live erabs
         for erab_id in set(ue.erab_flows.keys()):
@@ -379,40 +381,47 @@ def add(s, ue_stats, stats, init=False):
 @func(_UE)
 def _update_qci_flows(ue, bitnext, qci_samples):
     for (δt, tx_bytes, u) in bitnext:
-        assert len(u.cutx) == 1
-        uc = _peek(u.cutx.values())
         qflows_live = set()  # of qci       qci flows that get updated from current utx entry
 
         # estimate time for current transmission
-        # normalize transport blocks to time in TTI units (if it is e.g.
-        # 2x2 mimo, we have 2x more transport blocks).
+        # first normalize transport blocks to time in TTI units (if it is e.g.
+        # 2x2 mimo, we have 2x more transport blocks) and then estimate tx time
+        # from transmission time on different cells C₁ and C₂ as
+        #
+        #   tx_time ∈ [max(t₁,t₂), min(t₁+t₂, δt/tti)]
         δt_tti = δt / tti
-        tx = (uc.tx + uc.retx) / uc.rank    # both transmission and retransmission take time
-        tx = min(tx, δt_tti)            # protection (should not happen)
+        tx_lo = 0
+        tx_hi = 0
+        for uc in u.cutx.values():
+            ctx = (uc.tx + uc.retx) / uc.rank   # both transmission and retransmission take time
+            ctx = min(ctx, δt_tti)              # protection (should not happen)
+            ctx_lo = ctx_hi = ctx
 
-        # it might happen that even with correct bitsync we could end up with receiving tx=0 here.
-        # for example it happens if finish interrupts proper bitsync workflow e.g. as follows:
-        #
-        #   1000    0
-        #               <-- finish
-        #      0   10
-        #
-        # if we see #tx = 0 we say that it might be anything in between 1 and δt.
-        tx_lo = tx_hi = tx
-        if tx == 0:
-            tx_hi = δt_tti
-            tx_lo = min(1, tx_hi)
+            # it might happen that even with correct bitsync we could end up with receiving ctx=0 here.
+            # for example it happens if finish interrupts proper bitsync workflow e.g. as follows:
+            #
+            #   1000    0
+            #               <-- finish
+            #      0   10
+            #
+            # if we see ctx = 0 we say that it might be anything in between 1 and δt.
+            if ctx_lo == 0:
+                ctx_hi = δt_tti
+                ctx_lo = min(1, ctx_hi)
 
-        # tx time on the cell is somewhere in [tx, δt_tti]
-        if uc.xl_use_avg < 0.9:
-            # not congested: it likely took the time to transmit ≈ tx
-            pass
-        else:
-            # potentially congested: we don't know how much congested it is and
-            # which QCIs are affected more and which less
-            # -> all we can say tx_time is only somewhere in between limits
-            tx_hi = δt_tti
+            # tx time on the cell is somewhere in [ctx, δt_tti]
+            if uc.xl_use_avg < 0.9:
+                # not congested: it likely took the time to transmit ≈ ctx
+                pass
+            else:
+                # potentially congested: we don't know how much congested it is and
+                # which QCIs are affected more and which less
+                # -> all we can say tx_time is only somewhere in between limits
+                ctx_hi = δt_tti
 
+            tx_lo  = max(tx_lo, ctx_lo)
+            tx_hi += ctx_hi
+        tx_hi = min(tx_hi, δt_tti)
 
         # share/distribute tx time over all QCIs.
         for qci, tx_bytes_qci in u.qtx_bytes.items():

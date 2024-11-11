@@ -164,6 +164,8 @@ def UCtx(tx, bitrate, rank, xl_use_avg):
 
 # -------- tests --------
 
+# TODO verify Sampler/multicell.
+
 # test_Sampler1 verifies Sampler on single erab/qci flows.
 def test_Sampler1():
     # _ constructs tSampler, feeds tx stats into it and returns yielded Samples.
