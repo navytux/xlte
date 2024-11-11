@@ -152,6 +152,15 @@ class _BitSync:
         'i_lshift',     # next left shift will be done on txv[i_lshift] <- txv[i_lshift+1]
     )
 
+# _CTXBytesSplitter will serve _BitSync by spliting total tx_bytes into per-cell parts.
+#
+#   .next(δt, tx_bytes, {C → #tx, bitrate}) ->  [](δt', {C → #tx, ctx_bytes})
+#   .finish()                               ->  [](δt', {C → #tx, ctx_bytes})
+class _CTXBytesSplitter:
+    __slots__ = (
+        'txq',          # [](δt, tx_bytes, _Utx)
+    )
+
 
 # Sampler() creates new sampler that will start sampling from ue_stats0/stats0 state.
 @func(Sampler)
@@ -234,6 +243,9 @@ class _UCtx: # UE transmission state on particular cell
         'bitrate',
         'rank',
         'xl_use_avg',
+
+        # tx_bytes is per-cell part of total tx_bytes estimated by _CTXBytesSplitter
+        'tx_bytes',     # initially set to None
     )
 
 @func(_Sampler)
@@ -275,6 +287,8 @@ def add(s, ue_stats, stats, init=False):
 
         uc.rank       = cell['ri']  if s.use_ri  else 1
         uc.xl_use_avg = scell['%s_use_avg' % s.dir]
+
+        uc.tx_bytes = None
 
         ue = s.ues.get(ue_id)
         if ue is None:
@@ -648,6 +662,71 @@ def _rebalance(s, l):
             uc_i.tx = t_i
             s.txq[i] = (δt_i, b_i, u_i)
     #print('  < rebalance', s.txq[:l])
+
+
+# _CTXBytesSplitter creates new empty txsplit.
+@func(_CTXBytesSplitter)
+def __init__(s):
+    s.txq = []
+
+# next feeds next (δt, tx_bytes, u) into txsplit.
+#
+# and returns ready parts of split stream.
+@func(_CTXBytesSplitter)
+def next(s, δt, tx_bytes, u: _Utx): # -> [](δt', u'+.txbytes)
+    # split tx_bytes in between cells according to (β₁+β₂)/Σcells(β₁+β₂)
+    # where βi is cell bandwidth in frame i.
+    assert len(s.txq) < 2
+    s.txq.append((δt, tx_bytes, u))
+
+    vtx = []    # of (δt', u'+.txbytes)
+    while len(s.txq) >= 2:
+        δt, tx_bytes, u1 = s.txq.pop(0)
+        _,  _,        u2 = s.txq[0]
+
+        Σβ12 = 0
+        for cell_id, uc1 in u1.cutx.items():
+            Σβ12 += uc1.bitrate
+            if cell_id in u2.cutx:
+                uc2 = u2.cutx[cell_id]
+                Σβ12 += uc2.bitrate
+
+        for cell_id, uc1 in u1.cutx.items():
+            β12 = uc1.bitrate
+            uc2 = u2.cutx.get(cell_id)
+            if uc2 is not None:
+                β12 += uc2.bitrate
+
+            if Σβ12 != 0:
+                uc1.tx_bytes = tx_bytes * β12 / Σβ12
+            else:
+                # should not happen, but divide equally just in case
+                uc1.tx_bytes = tx_bytes / len(u1.cutx)
+
+        vtx.append((δt, u1))
+
+    return vtx
+
+# finish tells txsplit to flush its output queue.
+#
+# txsplit becomes reset.
+@func(_CTXBytesSplitter)
+def finish(s): # -> [](δt', u'+.txbytes)
+    assert len(s.txq) < 2
+    if len(s.txq) == 0:
+        return []
+
+    assert len(s.txq) == 1
+    # yield last chunk, by appending artificial empty tx frame
+    zutx = _Utx()
+    zutx.qtx_bytes = {}
+    zutx.cutx      = {}
+    vtx = s.next(s.txq[0][0], 0, zutx)
+    assert len(vtx) == 1
+    assert len(s.txq) == 1
+    s.txq = []
+
+    return vtx
 
 
 # __repr__ returns human-readable representation of Sample.

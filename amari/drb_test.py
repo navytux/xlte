@@ -20,7 +20,7 @@
 
 from __future__ import print_function, division, absolute_import
 
-from xlte.amari.drb import _Sampler, Sample, _BitSync, _Utx, _UCtx, tti, _IncStats
+from xlte.amari.drb import _Sampler, Sample, _BitSync, _CTXBytesSplitter, _Utx, _UCtx, tti, _IncStats
 import numpy as np
 from golang import func
 
@@ -158,6 +158,7 @@ def UCtx(tx, bitrate, rank, xl_use_avg):
     uc.bitrate = bitrate
     uc.rank    = rank
     uc.xl_use_avg = xl_use_avg
+    uc.tx_bytes = None
     return uc
 
 
@@ -581,6 +582,113 @@ def test_BitSync():
                                 (14392, 5.6),
                                 (    0, 0  )]
 
+
+# verify how tx_bytes is partitioned in between cells by _BitSync.
+def test_CTXBytesSplitter():
+    # _ passes txv_in into _CTXBytesSplitter and returns output stream.
+    #
+    # txv_in = [](tx_bytes, byterate1, byterate2)
+    def _(*txv_in):
+        def _do_txsplit(*txv_in):
+            txv_out = []
+            txsplit = _CTXBytesSplitter()
+
+            # Utx2 returns _Utx representing transmission on up to two cells.
+            def Utx2(byterate1, byterate2):
+                u = _Utx()
+                u.qtx_bytes = None  # not used by _CTXBytesSplitter
+                u.cutx = {}
+                if byterate1 is not None:
+                    u.cutx[1] = UCtx(None, 8*byterate1, None, None)
+                if byterate2 is not None:
+                    u.cutx[2] = UCtx(None, 8*byterate2, None, None)
+                return u
+
+            # t2iter yields result of txsplit .next/.finish in simplified form
+            # convenient for testing.
+            def t2iter(_): # -> i[](tx_bytes1, tx_bytes2)
+                for (δt, u) in _:
+                    assert δt == 10*tti
+                    assert set(u.cutx.keys()).issubset([1,2])
+                    tx_bytes1 = None
+                    tx_bytes2 = None
+                    if 1 in u.cutx:
+                        tx_bytes1 = u.cutx[1].tx_bytes
+                    if 2 in u.cutx:
+                        tx_bytes2 = u.cutx[2].tx_bytes
+                    yield (tx_bytes1, tx_bytes2)
+
+            for (tx_bytes, byterate1, byterate2) in txv_in:
+                _ = txsplit.next(10*tti, tx_bytes, Utx2(byterate1, byterate2))
+                txv_out += list(t2iter(_))
+
+            _ = txsplit.finish()
+            txv_out += list(t2iter(_))
+
+            return txv_out
+
+        def do_txsplit(*txv_in):
+            txv_out = _do_txsplit(*txv_in)
+
+            # verify the output is symmetrical in between C1 and C2
+            xtv_in = list((t, b2, b1) for (t, b1, b2) in txv_in)
+            xtv_out = _do_txsplit(*xtv_in)
+            xtv_out_ = list((t1, t2) for (t2, t1) in xtv_out)
+            assert xtv_out_ == txv_out
+
+            return txv_out
+
+        txv_out = do_txsplit(*txv_in)
+        # also check with 0-tail -> it should give the same
+        txv_out_ = do_txsplit(*(txv_in + ((0,0,0),)*10))
+        assert txv_out_ == txv_out + [(0,0)]*10
+
+        return txv_out
+
+    #                  C1        C2            C1       C2
+    #     tx_bytes  byterate  byterate      tx_bytes  tx_bytes
+
+    # (1 element only)
+    assert _((1000,  1000, None))       ==  [(1000,     None)]  # identity for 1 cell
+    assert _((1000,  1000,    0))       ==  [(1000,        0)]  # C2.bitrate = 0
+    assert _((1000,     0,    0))       ==  [( 500,      500)]  # ΣC.bitrate = 0  -> divided equally
+
+    # (≥ 2 elements - tests queuing)
+    assert _((1000,  1000, None),                               # identity for 1 cell
+             (2000,  2000, None))       ==  [(1000,     None),
+                                             (2000,     None)]
+
+    assert _((1000,  1000, None),                               # C2 appears
+             (2000,  1500,  500),
+             (2000,  1500,  500),
+             (2000,   500, 1500))       ==  [(1000,     None),
+                                             (1500,      500),
+                                             (1000,     1000),
+                                             ( 500,     1500)]
+
+    assert _((2000,  1000, 1000),                               # C2 disappears
+             (2000,  1500,  500),
+             (1000,   500, None),
+             (1000,  1000, None))       ==  [(1250,      750),
+                                             (1600,      400),
+                                             (1000,     None),
+                                             (1000,     None)]
+
+    assert _((2000,     0,    0),                               # ΣC.bitrate = 0
+             (2000,     0,    0),
+             (1000,     0,    0),
+             (1000,     0,    0))       ==  [(1000,     1000),
+                                             (1000,     1000),
+                                             ( 500,      500),
+                                             ( 500,      500)]
+
+    assert _((2000,     1,    0),                               # C2.bitrate = 0
+             (2000,     1,    0),
+             (1000,     1,    0),
+             (1000,     1,    0))       ==  [(2000,        0),
+                                             (2000,        0),
+                                             (1000,        0),
+                                             (1000,        0)]
 
 # ---- misc ----
 
