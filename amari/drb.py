@@ -111,6 +111,8 @@ class _ERAB_Flow:
 
 # _QCI_Flow represents in-progress collection to make up a Sample.
 #
+# It tracks data transmission on particular QCI of particular UE.
+#
 # .update(δt, tx_bytes, #tx, ...) updates flow with information about next
 #               transmission period and potentially yields some finalized Samples.
 # .finish() completes Sample collection.
@@ -246,7 +248,7 @@ def add(s, ue_stats, stats):  # -> dl/ul samples    ; dl/ul = {} qci -> []Sample
 
 class _Utx:  # UE transmission state
     __slots__ = (
-        'qtx_bytes',
+        'qtx_bytes',    # {} qci  -> Σδerab_qci=qci
         'cutx',         # {} cell -> _UCtx
     )
 
@@ -971,7 +973,7 @@ def _x_stats_srv(ctx, reqch: chan, conn: amari.Conn):
     # we can retrieve both ue_get and stats each at 100Hz simultaneously.
     conn_stats = amari.connect(ctx, conn.wsuri)
     defer(conn_stats.close)
-    rtt_stats = _IncStats() # like rtt_ue_stats but for stat instead of ue_get
+    rtt_stats = _IncStats() # like rtt_ue_stats but for stats instead of ue_get
     δt_stats  = _IncStats() # δ(stats.timestamp)
     t_stats   = None        # last stats.timestamp
     def rx_stats(ctx): # -> stats
@@ -1154,7 +1156,7 @@ def _x_stats_srv(ctx, reqch: chan, conn: amari.Conn):
                          'ul_tx_time_err':            Σul.tx_time_err,
                          'ul_tx_time_notailtti':      Σul.tx_time_notailtti,
                          'ul_tx_time_notailtti_err':  Σul.tx_time_notailtti_err,
-                         'u;_tx_nsamples':            Σul.tx_nsamples,
+                         'ul_tx_nsamples':            Σul.tx_nsamples,
                     }
 
                 r = {'time':       ue_stats['time'],

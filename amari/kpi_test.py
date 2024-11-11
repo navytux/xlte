@@ -645,7 +645,7 @@ def jdrb_stats(τ, qci_dlul):  # -> str
         assert set(dlul.keys()) == {"dl_tx_bytes", "dl_tx_time", "dl_tx_time_notailtti",
                                     "ul_tx_bytes", "ul_tx_time", "ul_tx_time_notailtti"}
         dlul["dl_tx_time_err"] = 0              # original time is simulated to be
-        dlul["ul_tx_time_err"] = 0              # measured precisely in tess.
+        dlul["ul_tx_time_err"] = 0              # measured precisely in tests.
         dlul["dl_tx_time_notailtti_err"] = 0    # ----//----
         dlul["ul_tx_time_notailtti_err"] = 0    #
 
