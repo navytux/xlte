@@ -224,6 +224,11 @@ def add(s, ue_stats, stats):  # -> dl/ul samples    ; dl/ul = {} qci -> []Sample
 class _Utx:  # UE transmission state
     __slots__ = (
         'qtx_bytes',
+        'cutx',         # {} cell -> _UCtx
+    )
+
+class _UCtx: # UE transmission state on particular cell
+    __slots__ = (
         'tx',
         'retx',
         'rank',
@@ -254,15 +259,19 @@ def add(s, ue_stats, stats, init=False):
         scell = stats['cells'][str(cell_id)]
 
         u = _Utx()
+        u.qtx_bytes  = {}  # qci  -> Σδerab_qci=qci
+        u.cutx       = {}  # cell -> _UCtx
 
-        u.tx   = cell['%s_tx'   % s.dir]  # in transport blocks
-        u.retx = cell['%s_retx' % s.dir]  # ----//----
-        assert u.tx   >= 0, u.tx
-        assert u.retx >= 0, u.retx
+        uc = _UCtx()
+        u.cutx[cell_id] = uc
 
-        u.qtx_bytes  = {}  # qci -> Σδerab_qci=qci
-        u.rank       = cell['ri']  if s.use_ri  else 1
-        u.xl_use_avg = scell['%s_use_avg' % s.dir]
+        uc.tx   = cell['%s_tx'   % s.dir]  # in transport blocks
+        uc.retx = cell['%s_retx' % s.dir]  # ----//----
+        assert uc.tx   >= 0, uc.tx
+        assert uc.retx >= 0, uc.retx
+
+        uc.rank       = cell['ri']  if s.use_ri  else 1
+        uc.xl_use_avg = scell['%s_use_avg' % s.dir]
 
         ue = s.ues.get(ue_id)
         if ue is None:
@@ -296,10 +305,10 @@ def add(s, ue_stats, stats, init=False):
                 u.qtx_bytes[qci] = u.qtx_bytes.get(qci,0) + etx_bytes
 
             # debug
-            if 0  and  s.dir == 'dl'  and  (etx_bytes != 0 or u.tx != 0 or u.retx != 0)  and qci==9:
+            if 0  and  s.dir == 'dl'  and  (etx_bytes != 0 or uc.tx != 0 or uc.retx != 0)  and qci==9:
                 sfnx = ((t // tti) / 10) % 1024  # = SFN.subframe
                 _debug('% 4.1f ue%s %s .%d: etx_total_bytes: %d  +%5d  tx: %2d  retx: %d  ri: %d  bitrate: %d' % \
-                        (sfnx, ue_id, s.dir, qci, etx_total_bytes, etx_bytes, u.tx, u.retx, u.rank, cell['%s_bitrate' % s.dir]))
+                        (sfnx, ue_id, s.dir, qci, etx_total_bytes, etx_bytes, uc.tx, uc.retx, uc.rank, cell['%s_bitrate' % s.dir]))
 
         # gc non-live erabs
         for erab_id in set(ue.erab_flows.keys()):
@@ -335,13 +344,15 @@ def add(s, ue_stats, stats, init=False):
 @func(_UE)
 def _update_qci_flows(ue, bitnext, qci_samples):
     for (δt, tx_bytes, u) in bitnext:
+        assert len(u.cutx) == 1
+        uc = _peek(u.cutx.values())
         qflows_live = set()  # of qci       qci flows that get updated from current utx entry
 
         # estimate time for current transmission
         # normalize transport blocks to time in TTI units (if it is e.g.
         # 2x2 mimo, we have 2x more transport blocks).
         δt_tti = δt / tti
-        tx = (u.tx + u.retx) / u.rank   # both transmission and retransmission take time
+        tx = (uc.tx + uc.retx) / uc.rank    # both transmission and retransmission take time
         tx = min(tx, δt_tti)            # protection (should not happen)
 
         # it might happen that even with correct bitsync we could end up with receiving tx=0 here.
@@ -358,7 +369,7 @@ def _update_qci_flows(ue, bitnext, qci_samples):
             tx_lo = min(1, tx_hi)
 
         # tx time on the cell is somewhere in [tx, δt_tti]
-        if u.xl_use_avg < 0.9:
+        if uc.xl_use_avg < 0.9:
             # not congested: it likely took the time to transmit ≈ tx
             pass
         else:
@@ -509,8 +520,10 @@ def next(s, δt, tx_bytes, u: _Utx): # -> [](δt', tx_bytes', u')
     s.txq.append((δt, tx_bytes, u))
 
     # move all time to .tx
-    u.tx   += u.retx
-    u.retx  = 0
+    assert len(u.cutx) == 1
+    uc = _peek(u.cutx.values())
+    uc.tx   += uc.retx
+    uc.retx  = 0
 
     # XXX for simplicity we currently handle sync in between only current and
     # next frames. That is enough to support FDD. TODO handle next-next case to support TDD
@@ -544,8 +557,8 @@ def next(s, δt, tx_bytes, u: _Utx): # -> [](δt', tx_bytes', u')
         assert s.i_txq <= i < s.i_txq + len(s.txq)
         i -= s.i_txq
 
-        δt1, b1, u1 = s.txq[i];     t1 = u1.tx
-        δt2, b2, u2 = s.txq[i+1];   t2 = u2.tx
+        δt1, b1, u1 = s.txq[i];     uc1 = _peek(u1.cutx.values());   t1 = uc1.tx
+        δt2, b2, u2 = s.txq[i+1];   uc2 = _peek(u2.cutx.values());   t2 = uc2.tx
         if b1 != 0:
             t22 = b2*t1/b1
         else:
@@ -558,8 +571,8 @@ def next(s, δt, tx_bytes, u: _Utx): # -> [](δt', tx_bytes', u')
             assert t1 >= 0, t1
             assert t2 >= 0, t2
 
-        u1.tx = t1
-        u2.tx = t2
+        uc1.tx = t1
+        uc2.tx = t2
         s.txq[i]   = (δt1, b1, u1)
         s.txq[i+1] = (δt2, b2, u2)
         #print('  < lshift  ', s.txq)
@@ -619,13 +632,13 @@ def _rebalance(s, l):
     assert l <= 3
 
     Σb = sum(_[1] for _ in s.txq[:l])
-    Σt = sum(_[2].tx for _ in s.txq[:l])
+    Σt = sum(_peek(_[2].cutx.values()).tx for _ in s.txq[:l])
     if Σb != 0:
         for i in range(l):
-            δt_i, b_i, u_i = s.txq[i];  t_i = u_i.tx
+            δt_i, b_i, u_i = s.txq[i];  uc_i = _peek(u_i.cutx.values());  t_i = uc_i.tx
             t_i = b_i * Σt / Σb
             assert t_i >= 0, t_i
-            u_i.tx = t_i
+            uc_i.tx = t_i
             s.txq[i] = (δt_i, b_i, u_i)
     #print('  < rebalance', s.txq[:l])
 
@@ -1003,3 +1016,9 @@ __debug = False
 def _debug(*argv):
     if __debug:
         print(*argv, file=sys.stderr)
+
+
+# _peek peeks first item from a sequence.
+# it is handy to use e.g. as _peek(dict.values()).
+def _peek(seq):
+    return next(iter(seq))

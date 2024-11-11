@@ -20,12 +20,12 @@
 
 from __future__ import print_function, division, absolute_import
 
-from xlte.amari.drb import _Sampler, Sample, _BitSync, _Utx, tti, _IncStats
+from xlte.amari.drb import _Sampler, Sample, _BitSync, _Utx, _UCtx, tti, _IncStats
 import numpy as np
 from golang import func
 
 
-# tSampler, UE, Etx and S provide infrastructure for testing _Sampler:
+# tSampler, UE, Etx, S and UCtx provide infrastructure for testing _Sampler:
 
 # Etx represents transmission on erab with qci of tx_bytes.
 class Etx:
@@ -146,6 +146,16 @@ def S(tx_bytes, tx_time_tti):
     s.tx_time     = (τ_lo + τ_hi) / 2 * tti
     s.tx_time_err = (τ_hi - τ_lo) / 2 * tti
     return s
+
+
+# UCtx is shortcut to create _UCtx.
+def UCtx(tx, rank, xl_use_avg):
+    uc = _UCtx()
+    uc.tx      = tx
+    uc.retx    = 0
+    uc.rank    = rank
+    uc.xl_use_avg = xl_use_avg
+    return uc
 
 
 # -------- tests --------
@@ -365,23 +375,26 @@ def test_BitSync():
             for x, (tx_bytes, tx) in enumerate(txv_in):
                 u = _Utx()
                 u.qtx_bytes = None  # bitsync itself does not use .qtx_bytes
-                u.tx   = tx
-                u.retx = 0
-                u.rank = 1
-                u.xl_use_avg = 0.1
+                u.cutx      = {1: UCtx(tx, 1, 0.1)}
                 u.qtx_bytes = x # XXX hack - see ^^^
                 _ =  bitsync.next(10*tti, tx_bytes, u)
                 for (δt, tx_bytes, u_) in _:
                     assert δt == 10*tti
-                    assert u_.retx == 0
-                    txv_out.append((tx_bytes, u_.tx))
+                    assert len(u_.cutx) == 1
+                    assert list(u_.cutx.keys()) == [1]
+                    uc_ = u_.cutx[1]
+                    assert uc_.retx == 0
+                    txv_out.append((tx_bytes, uc_.tx))
                     xv_out .append(u_.qtx_bytes)
 
             _ = bitsync.finish()
             for (δt, tx_bytes, u_) in _:
                 assert δt == 10*tti
-                assert u_.retx == 0
-                txv_out.append((tx_bytes, u_.tx))
+                assert len(u_.cutx) == 1
+                assert list(u_.cutx.keys()) == [1]
+                uc_ = u_.cutx[1]
+                assert uc_.retx == 0
+                txv_out.append((tx_bytes, uc_.tx))
                 xv_out .append(u_.qtx_bytes)
 
             xv_out = ''.join(chr(ord('a')+_) for _ in xv_out)
