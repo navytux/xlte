@@ -231,6 +231,7 @@ class _UCtx: # UE transmission state on particular cell
     __slots__ = (
         'tx',
         'retx',
+        'bitrate',
         'rank',
         'xl_use_avg',
     )
@@ -265,10 +266,12 @@ def add(s, ue_stats, stats, init=False):
         uc = _UCtx()
         u.cutx[cell_id] = uc
 
-        uc.tx   = cell['%s_tx'   % s.dir]  # in transport blocks
-        uc.retx = cell['%s_retx' % s.dir]  # ----//----
-        assert uc.tx   >= 0, uc.tx
-        assert uc.retx >= 0, uc.retx
+        uc.tx       = cell['%s_tx'   % s.dir]     # in transport blocks
+        uc.retx     = cell['%s_retx' % s.dir]     # ----//----
+        uc.bitrate  = cell['%s_bitrate' % s.dir]  # bits/s
+        assert uc.tx      >= 0, uc.tx
+        assert uc.retx    >= 0, uc.retx
+        assert uc.bitrate >= 0, uc.bitrate
 
         uc.rank       = cell['ri']  if s.use_ri  else 1
         uc.xl_use_avg = scell['%s_use_avg' % s.dir]
@@ -305,10 +308,14 @@ def add(s, ue_stats, stats, init=False):
                 u.qtx_bytes[qci] = u.qtx_bytes.get(qci,0) + etx_bytes
 
             # debug
-            if 0  and  s.dir == 'dl'  and  (etx_bytes != 0 or uc.tx != 0 or uc.retx != 0)  and qci==9:
+            if 0  and                   \
+               s.dir == 'dl'  and  (    \
+                 etx_bytes != 0 or      \
+                 uc.tx != 0 or uc.retx != 0 or uc.bitrate != 0      \
+               )  and qci==9:
                 sfnx = ((t // tti) / 10) % 1024  # = SFN.subframe
                 _debug('% 4.1f ue%s %s .%d: etx_total_bytes: %d  +%5d  tx: %2d  retx: %d  ri: %d  bitrate: %d' % \
-                        (sfnx, ue_id, s.dir, qci, etx_total_bytes, etx_bytes, uc.tx, uc.retx, uc.rank, cell['%s_bitrate' % s.dir]))
+                        (sfnx, ue_id, s.dir, qci, etx_total_bytes, etx_bytes, uc.tx, uc.retx, uc.rank, uc.bitrate))
 
         # gc non-live erabs
         for erab_id in set(ue.erab_flows.keys()):

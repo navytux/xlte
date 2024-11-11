@@ -37,14 +37,15 @@ class Etx:
 
 # UE represents one entry about an UE in ue_get[stats].ue_list .
 class UE:
-    def __init__(ue, ue_id, tx, retx, *etxv, ri=1):
+    def __init__(ue, ue_id, tx, retx, *etxv, ri=1, bitrate=None):
         for _ in etxv:
             assert isinstance(_, Etx)
         ue.ue_id = ue_id
-        ue.tx   = tx
-        ue.retx = retx
-        ue.etxv = etxv
-        ue.ri   = ri
+        ue.tx      = tx
+        ue.retx    = retx
+        ue.etxv    = etxv
+        ue.ri      = ri
+        ue.bitrate = bitrate  if bitrate is not None  else tx*1000
 
 # tSampler provides testing environment for _Sampler.
 #
@@ -101,9 +102,10 @@ class _tUEstats:
                 'cells': [
                     {
                         'cell_id': 1,
-                        'ri':      ue.ri,
-                        'zz_tx':   ue.tx,
-                        'zz_retx': ue.retx,
+                        'ri':         ue.ri,
+                        'zz_tx':      ue.tx,
+                        'zz_retx':    ue.retx,
+                        'zz_bitrate': ue.bitrate,
                     }
                 ],
                 'erab_list': erab_list,
@@ -149,10 +151,11 @@ def S(tx_bytes, tx_time_tti):
 
 
 # UCtx is shortcut to create _UCtx.
-def UCtx(tx, rank, xl_use_avg):
+def UCtx(tx, bitrate, rank, xl_use_avg):
     uc = _UCtx()
     uc.tx      = tx
     uc.retx    = 0
+    uc.bitrate = bitrate
     uc.rank    = rank
     uc.xl_use_avg = xl_use_avg
     return uc
@@ -372,11 +375,10 @@ def test_BitSync():
             txv_out = []
             xv_out  = []
             bitsync = _BitSync()
-            for x, (tx_bytes, tx) in enumerate(txv_in):
+            for bitrate, (tx_bytes, tx) in enumerate(txv_in):
                 u = _Utx()
                 u.qtx_bytes = None  # bitsync itself does not use .qtx_bytes
-                u.cutx      = {1: UCtx(tx, 1, 0.1)}
-                u.qtx_bytes = x # XXX hack - see ^^^
+                u.cutx      = {1: UCtx(tx, bitrate, 1, 0.1)}
                 _ =  bitsync.next(10*tti, tx_bytes, u)
                 for (δt, tx_bytes, u_) in _:
                     assert δt == 10*tti
@@ -385,7 +387,7 @@ def test_BitSync():
                     uc_ = u_.cutx[1]
                     assert uc_.retx == 0
                     txv_out.append((tx_bytes, uc_.tx))
-                    xv_out .append(u_.qtx_bytes)
+                    xv_out .append(uc_.bitrate)
 
             _ = bitsync.finish()
             for (δt, tx_bytes, u_) in _:
@@ -395,7 +397,7 @@ def test_BitSync():
                 uc_ = u_.cutx[1]
                 assert uc_.retx == 0
                 txv_out.append((tx_bytes, uc_.tx))
-                xv_out .append(u_.qtx_bytes)
+                xv_out .append(uc_.bitrate)
 
             xv_out = ''.join(chr(ord('a')+_) for _ in xv_out)
             assert xv_out == 'abcdefghijklmnopqrstuvwxyz'[:len(txv_in)]
