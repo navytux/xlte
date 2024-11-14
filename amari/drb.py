@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2023  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2023-2024  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -111,6 +111,8 @@ class _ERAB_Flow:
 
 # _QCI_Flow represents in-progress collection to make up a Sample.
 #
+# It tracks data transmission on particular QCI of particular UE.
+#
 # .update(δt, tx_bytes, #tx, ...) updates flow with information about next
 #               transmission period and potentially yields some finalized Samples.
 # .finish() completes Sample collection.
@@ -141,15 +143,38 @@ class _QCI_Flow:
 # adjusted stream with #tx corresponding to tx_bytes coming together
 # synchronized in time.
 #
-#   .next(δt, tx_bytes, #tx, X)  ->  [](δt', tx_bytes', #tx', X')
-#   .finish()                    ->  [](δt', tx_bytes', #tx', X')
+#   .next(δt, tx_bytes, {C → #tx, bitrate})  ->  [](δt', tx_bytes', {C → #tx'})
+#   .finish()                                ->  [](δt', tx_bytes', {C → #tx'})
 #
 # (*) see e.g. Figure 8.1 in "An introduction to LTE, 2nd ed."
 class _BitSync:
     __slots__ = (
-        'txq',          # [](δt,tx_bytes,#tx,X)     not-yet fully processed tail of whole txv
+        'txsplit',      # _CTXBytesSplitter that splits total tx_bytes into per-cell parts
+        'txq',          # [](δt, _Utx + .tx_bytes)  not-yet fully processed tail of whole txv
         'i_txq',        # txq represents txv[i_txq:]
-        'i_lshift',     # next left shift will be done on txv[i_lshift] <- txv[i_lshift+1]
+        'cbitsync1',    # {} cell -> _BitSync1      s1.i_txq = .i_txq;  len(s1.txq) = len(.txq)
+                        #                           s1.i_txq and s1.i_lshift are kept in sync
+                        #                           in between all bitsync1s
+    )
+
+# _BitSync1 serves _BitSync by handling transmission substream on one particuar cell.
+#
+#   .next(ctx_bytes, #tx)  ->  [](ctx_bytes', #tx')
+#   .finish()              ->  [](ctx_bytes', #tx')
+class _BitSync1:
+    __slots__ = (
+        'txq',          # [](ctx_bytes,#tx)     not-yet fully processed tail of whole txv/cell
+        'i_txq',        # txq represents txv/cell[i_txq:]
+        'i_lshift',     # next left shift of #tx will be done on txv/cell[i_lshift] <- txv/cell[i_lshift+1]
+    )
+
+# _CTXBytesSplitter serves _BitSync by spliting total tx_bytes into per-cell parts.
+#
+#   .next(δt, tx_bytes, {C → #tx, bitrate}) ->  [](δt', {C → #tx, ctx_bytes})
+#   .finish()                               ->  [](δt', {C → #tx, ctx_bytes})
+class _CTXBytesSplitter:
+    __slots__ = (
+        'txq',          # [](δt, tx_bytes, _Utx)
     )
 
 
@@ -221,11 +246,22 @@ def add(s, ue_stats, stats):  # -> dl/ul samples    ; dl/ul = {} qci -> []Sample
     ul = s._ul_sampler.add(ue_stats, stats)
     return dl, ul
 
-class _Utx:  # transmission state passed through bitsync
+class _Utx:  # UE transmission state
     __slots__ = (
-        'qtx_bytes',
+        'qtx_bytes',    # {} qci  -> Σδerab_qci=qci
+        'cutx',         # {} cell -> _UCtx
+    )
+
+class _UCtx: # UE transmission state on particular cell
+    __slots__ = (
+        'tx',
+        'retx',
+        'bitrate',
         'rank',
         'xl_use_avg',
+
+        # tx_bytes is per-cell part of total tx_bytes estimated by _CTXBytesSplitter
+        'tx_bytes',     # initially set to None
     )
 
 @func(_Sampler)
@@ -243,22 +279,29 @@ def add(s, ue_stats, stats, init=False):
         ue_id = ju['enb_ue_id']    # TODO 5G: -> ran_ue_id + qos_flow_list + sst?
         ue_live.add(ue_id)
 
-        if len(ju['cells']) != 1:
-            raise RuntimeError(("ue #%s belongs to %d cells;  "+
-                "but only single-cell configurations are supported") % (ue_id, len(ju(['cells']))))
-        cell = ju['cells'][0]
-        tx   = cell['%s_tx'   % s.dir]  # in transport blocks
-        retx = cell['%s_retx' % s.dir]  # ----//----
-        assert tx   >= 0, tx
-        assert retx >= 0, retx
-
-        cell_id = cell['cell_id']  # int
-        scell = stats['cells'][str(cell_id)]
-
         u = _Utx()
-        u.qtx_bytes  = {}  # qci -> Σδerab_qci=qci
-        u.rank       = cell['ri']  if s.use_ri  else 1
-        u.xl_use_avg = scell['%s_use_avg' % s.dir]
+        u.qtx_bytes  = {}  # qci  -> Σδerab_qci=qci
+        u.cutx       = {}  # cell -> _UCtx
+
+        for ucell in ju['cells']:
+            cell_id = ucell['cell_id']  # int
+            stats_cell = stats['cells'][str(cell_id)]
+
+            uc = _UCtx()
+            assert cell_id not in u.cutx,  u.cutx
+            u.cutx[cell_id] = uc
+
+            uc.tx       = ucell['%s_tx'      % s.dir]  # in transport blocks
+            uc.retx     = ucell['%s_retx'    % s.dir]  # ----//----
+            uc.bitrate  = ucell['%s_bitrate' % s.dir]  # bits/s
+            assert uc.tx      >= 0, uc.tx
+            assert uc.retx    >= 0, uc.retx
+            assert uc.bitrate >= 0, uc.bitrate
+
+            uc.rank       = ucell['ri']  if s.use_ri  else 1
+            uc.xl_use_avg = stats_cell['%s_use_avg' % s.dir]
+
+            uc.tx_bytes = None
 
         ue = s.ues.get(ue_id)
         if ue is None:
@@ -292,22 +335,30 @@ def add(s, ue_stats, stats, init=False):
                 u.qtx_bytes[qci] = u.qtx_bytes.get(qci,0) + etx_bytes
 
             # debug
-            if 0  and  s.dir == 'dl'  and  (etx_bytes != 0 or tx != 0 or retx != 0)  and qci==9:
+            if 0  and                   \
+               s.dir == 'dl'  and  (    \
+                 etx_bytes != 0 or      \
+                 any([(uc.tx != 0 or uc.retx != 0 or uc.bitrate != 0)  for uc in u.cutx.values()])   \
+               )  and qci==9:
                 sfnx = ((t // tti) / 10) % 1024  # = SFN.subframe
-                _debug('% 4.1f ue%s %s .%d: etx_total_bytes: %d  +%5d  tx: %2d  retx: %d  ri: %d  bitrate: %d' % \
-                        (sfnx, ue_id, s.dir, qci, etx_total_bytes, etx_bytes, tx, retx, u.rank, cell['%s_bitrate' % s.dir]))
+                dtx  = '% 4.1f ue%s %s .%d: etx_total_bytes: %d  +%5d' % \
+                       (sfnx, ue_id, s.dir, qci, etx_total_bytes, etx_bytes)
+                for cell_id in sorted(u.cutx):
+                    uc = u.cutx[cell_id]
+                    dtx += '|  C%d:  tx %2d  retx %d  ri %d  bitrate %d' % \
+                           (cell_id, uc.tx, uc.retx, uc.rank, uc.bitrate)
+                _debug(dtx)
 
         # gc non-live erabs
         for erab_id in set(ue.erab_flows.keys()):
             if erab_id not in eflows_live:
                 del ue.erab_flows[erab_id]
 
-        # bitsync <- (δt, tx_bytes, #tx, u)
-        tx += retx # both transmission and retransmission take time
+        # bitsync <- (δt, tx_bytes, u)
         if ue.bitsync is not None:
-            bitnext = ue.bitsync.next(δt, tx_bytes, tx, u)
+            bitnext = ue.bitsync.next(δt, tx_bytes, u)
         else:
-            bitnext = [(δt, tx_bytes, tx, u)]
+            bitnext = [(δt, tx_bytes, u)]
 
         # update qci flows
         if init:
@@ -326,27 +377,55 @@ def add(s, ue_stats, stats, init=False):
     return qci_samples
 
 
-# _update_qci_flows updates .qci_flows for ue with (δt, tx_bytes, #tx, _Utx) yielded from bitsync.
+# _update_qci_flows updates .qci_flows for ue with (δt, tx_bytes, _Utx) yielded from bitsync.
 #
 # yielded samples are appended to qci_samples  ({} qci -> []Sample).
 @func(_UE)
 def _update_qci_flows(ue, bitnext, qci_samples):
-    for (δt, tx_bytes, tx, u) in bitnext:
+    for (δt, tx_bytes, u) in bitnext:
         qflows_live = set()  # of qci       qci flows that get updated from current utx entry
 
-        # it might happen that even with correct bitsync we could end up with receiving tx=0 here.
-        # for example it happens if finish interrupts proper bitsync workflow e.g. as follows:
+        # estimate time for current transmission
+        # first normalize transport blocks to time in TTI units (if it is e.g.
+        # 2x2 mimo, we have 2x more transport blocks) and then estimate tx time
+        # from transmission time on different cells C₁ and C₂ as
         #
-        #   1000    0
-        #               <-- finish
-        #      0   10
-        #
-        # if we see #tx = 0 we say that it might be anything in between 1 and δt.
-        tx_lo = tx_hi = tx
-        if tx == 0:
-            tx_hi = δt/tti
-            tx_lo = min(1, tx_hi)
+        #   tx_time ∈ [max(t₁,t₂), min(t₁+t₂, δt/tti)]
+        δt_tti = δt / tti
+        tx_lo = 0
+        tx_hi = 0
+        for uc in u.cutx.values():
+            ctx = (uc.tx + uc.retx) / uc.rank   # both transmission and retransmission take time
+            ctx = min(ctx, δt_tti)              # protection (should not happen)
+            ctx_lo = ctx_hi = ctx
 
+            # it might happen that even with correct bitsync we could end up with receiving ctx=0 here.
+            # for example it happens if finish interrupts proper bitsync workflow e.g. as follows:
+            #
+            #   1000    0
+            #               <-- finish
+            #      0   10
+            #
+            # if we see ctx = 0 we say that it might be anything in between 1 and δt.
+            if ctx_lo == 0:
+                ctx_hi = δt_tti
+                ctx_lo = min(1, ctx_hi)
+
+            # tx time on the cell is somewhere in [ctx, δt_tti]
+            if uc.xl_use_avg < 0.9:
+                # not congested: it likely took the time to transmit ≈ ctx
+                pass
+            else:
+                # potentially congested: we don't know how much congested it is and
+                # which QCIs are affected more and which less
+                # -> all we can say tx_time is only somewhere in between limits
+                ctx_hi = δt_tti
+
+            tx_lo  = max(tx_lo, ctx_lo)
+            tx_hi += ctx_hi
+        tx_hi = min(tx_hi, δt_tti)
+
+        # share/distribute tx time over all QCIs.
         for qci, tx_bytes_qci in u.qtx_bytes.items():
             qflows_live.add(qci)
 
@@ -354,8 +433,6 @@ def _update_qci_flows(ue, bitnext, qci_samples):
             if qf is None:
                 qf = ue.qci_flows[qci] = _QCI_Flow()
 
-            # share/distribute #tx transport blocks over all QCIs.
-            #
             # Consider two streams "x" and "o" and how LTE scheduler might
             # place them into resource map: if the streams have the same
             # priority they might be scheduled e.g. as shown in case "a".
@@ -387,7 +464,7 @@ def _update_qci_flows(ue, bitnext, qci_samples):
             if qtx_lo > tx_hi:  # e.g. 6.6 * 11308 / 11308 = 6.6 + ~1e-15
                 qtx_lo -= 1e-4
             assert 0 < qtx_lo <= tx_hi, (qtx_lo, tx_hi, tx_bytes_qci, tx_bytes)
-            _ = qf.update(δt, tx_bytes_qci, qtx_lo, tx_hi, u.rank, u.xl_use_avg)
+            _ = qf.update(δt, tx_bytes_qci, qtx_lo, tx_hi)
             for sample in _:
                 qci_samples.setdefault(qci, []).append(sample)
 
@@ -407,39 +484,22 @@ def __init__(qf):
     qf.tx_time_err = 0
 
 # update updates flow with information that so many bytes were transmitted during
-# δt with using #tx transport blocks somewhere in [tx_lo,tx_hi] and with
-# specified rank. It is also known that overall average usage of resource
-# blocks corresponding to tx direction in the resource map is xl_use_avg.
+# δt with using tx transmission time somewhere in [tx_lo,tx_hi].
 @func(_QCI_Flow)
-def update(qf, δt, tx_bytes, tx_lo, tx_hi, rank, xl_use_avg):  # -> []Sample
-    #_debug('QF.update %.2ftti %5db %.1f-%.1ftx %drank %.2fuse' % (δt/tti, tx_bytes, tx_lo, tx_hi, rank, xl_use_avg))
-
-    tx_lo /= rank # normalize TB to TTI (if it is e.g. 2x2 mimo, we have 2x more transport blocks)
-    tx_hi /= rank
+def update(qf, δt, tx_bytes, tx_lo, tx_hi):  # -> []Sample
+    #_debug('QF.update %.2ftti %5db %.1f-%.1ftx' % (δt/tti, tx_bytes, tx_lo, tx_hi))
 
     vout = []
-    s = qf._update(δt, tx_bytes, tx_lo, tx_hi, xl_use_avg)
+    s = qf._update(δt, tx_bytes, tx_lo, tx_hi)
     if s is not None:
         vout.append(s)
     return vout
 
 @func(_QCI_Flow)
-def _update(qf, δt, tx_bytes, tx_lo, tx_hi, xl_use_avg): # -> ?Sample
+def _update(qf, δt, tx_bytes, tx_lo, tx_hi): # -> ?Sample
     assert tx_bytes > 0
     δt_tti = δt / tti
 
-    tx_lo = min(tx_lo, δt_tti)  # protection (should not happen)
-    tx_hi = min(tx_hi, δt_tti)  # protection (should not happen)
-
-    # tx time is somewhere in [tx, δt_tti]
-    if xl_use_avg < 0.9:
-        # not congested: it likely took the time to transmit ≈ #tx
-        pass
-    else:
-        # potentially congested: we don't know how much congested it is and
-        # which QCIs are affected more and which less
-        # -> all we can say tx_time is only somewhere in between limits
-        tx_hi = δt_tti
     tx_time     = (tx_lo + tx_hi) / 2 * tti
     tx_time_err = (tx_hi - tx_lo) / 2 * tti
 
@@ -494,16 +554,167 @@ def _sample(qf):
 # _BitSync creates new empty bitsync.
 @func(_BitSync)
 def __init__(s):
+    s.txsplit = _CTXBytesSplitter()
+    s.txq = []
+    s.i_txq = 0
+    s.cbitsync1 = {}
+
+# _assert_all_insync asserts that data structures of bitsync and all bitsyncs1
+# are in consistent synchronized state.
+@func(_BitSync)
+def _assert_all_insync(s):
+    if len(s.cbitsync1) == 0:
+        return
+    s1_base = _peek(s.cbitsync1.values())
+    assert s.i_txq    == s1_base.i_txq          ,   (s.i_txq,   s1_base.i_txq)
+    assert len(s.txq) == len(s1_base.txq)       ,   (s.txq,     s1_base.txq)
+    for s1 in s.cbitsync1.values():
+        assert s1.i_txq    == s1_base.i_txq     ,   (s1.i_txq,    s1_base.i_txq)
+        assert len(s1.txq) == len(s1_base.txq)  ,   (s1.txq,      s1_base.txq)
+        assert s1.i_lshift == s1_base.i_lshift  ,   (s1.i_lshift, s1_base.i_lshift)
+
+# next feeds next (δt, tx_bytes, _Utx) into bitsync.
+#
+# and returns ready parts of adjusted stream.
+@func(_BitSync)
+def next(s, δt, tx_bytes, u: _Utx): # -> [](δt', tx_bytes', u')
+    vbitnext = []
+    # split total tx_bytes in between cells proportional to their bitrate
+    # yielded ub_ come with .tx_bytes set on each cell's _UCtx
+    for (δt, ub_) in s.txsplit.next(δt, tx_bytes, u):
+        vbitnext += s._next(δt, ub_)
+    return vbitnext
+
+@func(_BitSync)
+def _next(s, δt, u: _Utx):
+    s._assert_all_insync()
+
+    s.txq.append((δt, u))
+    cvbitnext1 = {}  # cell -> [vbitnext1]
+
+    # base bitsync1 wrt which we will verify all other bitsync1s and bitsync
+    s1_base = None
+    s1_base_len_txq  = None
+    s1_base_i_lshift = None
+    if len(s.cbitsync1) > 0:
+        s1_base = _peek(s.cbitsync1.values())
+        s1_base_len_txq  = len(s1_base.txq)
+        s1_base_i_lshift = s1_base.i_lshift
+
+    # feed each bitsync1 with per-cell tx_bytes
+    for cell_id, uc in u.cutx.items():
+        if cell_id not in s.cbitsync1:
+            s1 = _BitSync1()
+            s1.i_txq    = s.i_txq
+            s1.i_lshift = s.i_txq
+            # prefeed 0 to this bitsync1 to keep .i_lshift in sync with others
+            if s1_base is None:
+                s1_base = s1
+                s1_base_len_txq  = len(s1_base.txq)
+                s1_base_i_lshift = s1_base.i_lshift
+            else:
+                while len(s1.txq) < s1_base_len_txq:
+                   _ = s1.next(0, 0)
+                   assert _ == []
+            assert s1.i_txq == s.i_txq
+            assert s1.i_lshift == s1_base_i_lshift
+            assert len(s1.txq) == s1_base_len_txq
+            s.cbitsync1[cell_id] = s1
+        else:
+            s1 = s.cbitsync1[cell_id]
+
+        cvbitnext1[cell_id] = s1.next(uc.tx_bytes, uc.tx + uc.retx)
+
+    # if a cell had no transmission activity it is fed with 0 tx_bytes/#tx so
+    # that its bitsync1 stays synchronized with bitsync1 of other cells
+    for cell_id in s.cbitsync1:
+        if cell_id not in u.cutx:
+            s1 = s.cbitsync1[cell_id]
+            cvbitnext1[cell_id] = s1.next(0, 0)
+
+    # merge results from all bitsync1s back into adjusted tx_bytes' and u'
+    vbitnext = s._merge_cvbitnext1(cvbitnext1)
+    s._assert_all_insync()
+    return vbitnext
+
+# finish tells bitsync to flush its output queue.
+#
+# the bitsync becomes reset.
+@func(_BitSync)
+def finish(s): # -> [](δt', tx_bytes', u')
+    s._assert_all_insync()
+
+    # flush bitrate prefilter
+    vbitnext = []
+    for (δt, u) in s.txsplit.finish():
+        vbitnext += s._next(δt, u)
+
+    cvbitnext1 = {}  # cell -> [vbitnext1]
+    for cell_id, s1 in s.cbitsync1.items():
+        cvbitnext1[cell_id] = s1.finish()
+
+    vbitnext += s._merge_cvbitnext1(cvbitnext1)
+    s._assert_all_insync()
+
+    assert len(s.txq) == 0
+    s.cbitsync1 = {}
+
+    return vbitnext
+
+
+# _merge_cvbitnext1 combines per-cell results of _BitSync1.next or
+# _BitSync1.finish for multiple cells into multi-cell result for _BitSync.next
+# or _BitSync.finish.
+@func(_BitSync)
+def _merge_cvbitnext1(s, cvbitnext1): # -> [](δt', tx_bytes', u')
+    vbitnext = []
+    if len(cvbitnext1) > 0:
+        vbitnext1_base = _peek(cvbitnext1.values())
+        for vbitnext1 in cvbitnext1.values():
+            assert len(vbitnext1) == len(vbitnext1_base)  , (vbitnext1, vbitnext1_base)
+
+        for i in range(len(vbitnext1_base)):
+            δt, u = s.txq.pop(0)
+            s.i_txq += 1
+
+            tx_bytes = 0
+            for cell_id, vbitnext1 in cvbitnext1.items():
+                if cell_id not in u.cutx:
+                    # cell will soon appear for real. For now it appeared because
+                    # _BitSync._next prepended zero transmissions to this cell to
+                    # align its _BitSync1 with with bitsyncs of other cells.
+                    u.cutx[cell_id] = uc = _UCtx()
+                    uc.tx         = 0
+                    uc.retx       = 0
+                    uc.bitrate    = 0
+                    uc.rank       = 1
+                    uc.xl_use_avg = 0
+                    uc.tx_bytes   = 0
+                else:
+                    uc = u.cutx[cell_id]
+
+                ctx_bytes, uc.tx = vbitnext1[i]
+                uc.retx = 0 # because individual bitsync1 moves all to .tx
+                tx_bytes += ctx_bytes
+
+            vbitnext.append((δt, tx_bytes, u))
+    return vbitnext
+
+
+
+# _BitSync1 creates new empty bitsync1.
+@func(_BitSync1)
+def __init__(s):
     s.txq = []
     s.i_txq     = 0
     s.i_lshift  = 0
 
-# next feeds next (δt, tx_bytes, tx) into bitsync.
+# next feeds next (δt, tx_bytes, tx) into bitsync1.
 #
 # and returns ready parts of adjusted stream.
-@func(_BitSync)
-def next(s, δt, tx_bytes, tx, X): # -> [](δt', tx_bytes', tx', X')
-    s.txq.append((δt, tx_bytes, tx, X))
+@func(_BitSync1)
+def next(s, tx_bytes, tx): # -> [](tx_bytes', tx')
+    s.txq.append((tx_bytes, tx))
 
     # XXX for simplicity we currently handle sync in between only current and
     # next frames. That is enough to support FDD. TODO handle next-next case to support TDD
@@ -537,8 +748,8 @@ def next(s, δt, tx_bytes, tx, X): # -> [](δt', tx_bytes', tx', X')
         assert s.i_txq <= i < s.i_txq + len(s.txq)
         i -= s.i_txq
 
-        δt1, b1, t1, X1 = s.txq[i]
-        δt2, b2, t2, X2 = s.txq[i+1]
+        b1, t1 = s.txq[i]
+        b2, t2 = s.txq[i+1]
         if b1 != 0:
             t22 = b2*t1/b1
         else:
@@ -551,8 +762,8 @@ def next(s, δt, tx_bytes, tx, X): # -> [](δt', tx_bytes', tx', X')
             assert t1 >= 0, t1
             assert t2 >= 0, t2
 
-        s.txq[i]   = (δt1, b1, t1, X1)
-        s.txq[i+1] = (δt2, b2, t2, X2)
+        s.txq[i]   = (b1, t1)
+        s.txq[i+1] = (b2, t2)
         #print('  < lshift  ', s.txq)
 
     while s.i_lshift+1 < s.i_txq + len(s.txq):
@@ -574,15 +785,17 @@ def next(s, δt, tx_bytes, tx, X): # -> [](δt', tx_bytes', tx', X')
         vout.append(_)
     return vout
 
-# finish tells bitsync to flush its output queue.
+# finish tells bitsync1 to flush its output queue.
 #
-# the bitsync becomes reset.
-@func(_BitSync)
-def finish(s): # -> [](δt', tx_bytes', tx', X')
+# the bitsync1 becomes reset.
+@func(_BitSync1)
+def finish(s): # -> [](tx_bytes', tx')
     assert len(s.txq) < 3
     s._rebalance(len(s.txq))
     vout = s.txq
     s.txq = []
+    s.i_txq += len(vout)
+    s.i_lshift = s.i_txq
     return vout
 
 # _rebalance redistributes tx_i in .txq[:l] proportional to tx_bytes_i:
@@ -603,21 +816,86 @@ def finish(s): # -> [](δt', tx_bytes', tx', X')
 #
 # and has the effect of moving #tx from periods with tx_bytes=0, to periods
 # where transmission actually happened (tx_bytes > 0).
-@func(_BitSync)
+@func(_BitSync1)
 def _rebalance(s, l):
     #print('  > rebalance', s.txq[:l])
     assert l <= len(s.txq)
     assert l <= 3
 
-    Σb = sum(_[1] for _ in s.txq[:l])
-    Σt = sum(_[2] for _ in s.txq[:l])
+    Σb = sum(_[0] for _ in s.txq[:l])
+    Σt = sum(_[1] for _ in s.txq[:l])
     if Σb != 0:
         for i in range(l):
-            δt_i, b_i, t_i, X_i = s.txq[i]
+            b_i, t_i = s.txq[i]
             t_i = b_i * Σt / Σb
             assert t_i >= 0, t_i
-            s.txq[i] = (δt_i, b_i, t_i, X_i)
+            s.txq[i] = (b_i, t_i)
     #print('  < rebalance', s.txq[:l])
+
+
+# _CTXBytesSplitter creates new empty txsplit.
+@func(_CTXBytesSplitter)
+def __init__(s):
+    s.txq = []
+
+# next feeds next (δt, tx_bytes, u) into txsplit.
+#
+# and returns ready parts of split stream.
+@func(_CTXBytesSplitter)
+def next(s, δt, tx_bytes, u: _Utx): # -> [](δt', u'+.txbytes)
+    # split tx_bytes in between cells according to (β₁+β₂)/Σcells(β₁+β₂)
+    # where βi is cell bandwidth in frame i.
+    assert len(s.txq) < 2
+    s.txq.append((δt, tx_bytes, u))
+
+    vtx = []    # of (δt', u'+.txbytes)
+    while len(s.txq) >= 2:
+        δt, tx_bytes, u1 = s.txq.pop(0)
+        _,  _,        u2 = s.txq[0]
+
+        Σβ12 = 0
+        for cell_id, uc1 in u1.cutx.items():
+            Σβ12 += uc1.bitrate
+            if cell_id in u2.cutx:
+                uc2 = u2.cutx[cell_id]
+                Σβ12 += uc2.bitrate
+
+        for cell_id, uc1 in u1.cutx.items():
+            β12 = uc1.bitrate
+            uc2 = u2.cutx.get(cell_id)
+            if uc2 is not None:
+                β12 += uc2.bitrate
+
+            if Σβ12 != 0:
+                uc1.tx_bytes = tx_bytes * β12 / Σβ12
+            else:
+                # should not happen, but divide equally just in case
+                uc1.tx_bytes = tx_bytes / len(u1.cutx)
+
+        vtx.append((δt, u1))
+
+    return vtx
+
+# finish tells txsplit to flush its output queue.
+#
+# txsplit becomes reset.
+@func(_CTXBytesSplitter)
+def finish(s): # -> [](δt', u'+.txbytes)
+    assert len(s.txq) < 2
+    if len(s.txq) == 0:
+        return []
+
+    assert len(s.txq) == 1
+    # yield last chunk, by appending artificial empty tx frame
+    zutx = _Utx()
+    zutx.qtx_bytes = {}
+    zutx.cutx      = {}
+    vtx = s.next(s.txq[0][0], 0, zutx)
+    assert len(vtx) == 1
+    assert len(s.txq) == 1
+    s.txq = []
+
+    return vtx
 
 
 # __repr__ returns human-readable representation of Sample.
@@ -635,6 +913,15 @@ def __repr__(s):
     b_hi = div(s.tx_bytes*8, t_lo)
     return "Sample(%db, %.1f ±%.1ftti)\t# %.0f ±%.0f bit/s" % \
             (s.tx_bytes, s.tx_time/tti, s.tx_time_err/tti, div(s.tx_bytes*8, s.tx_time), (b_hi - b_lo)/2)
+
+# __repr__ returns human-readable representation of _Utx and _UCtx.
+@func(_Utx)
+def __repr__(u):
+    return "Utx(qtx_bytes: %r,  cutx: %r)" % (u.qtx_bytes, u.cutx)
+@func(_UCtx)
+def __repr__(uc):
+    return "UCtx(%dt, %dr, %.0f bit/s, %dri, %.2f use  |  %r tx_bytes)" % \
+           (uc.tx, uc.retx, uc.bitrate, uc.rank, uc.xl_use_avg, uc.tx_bytes)
 
 
 # ----------------------------------------
@@ -686,7 +973,7 @@ def _x_stats_srv(ctx, reqch: chan, conn: amari.Conn):
     # we can retrieve both ue_get and stats each at 100Hz simultaneously.
     conn_stats = amari.connect(ctx, conn.wsuri)
     defer(conn_stats.close)
-    rtt_stats = _IncStats() # like rtt_ue_stats but for stat instead of ue_get
+    rtt_stats = _IncStats() # like rtt_ue_stats but for stats instead of ue_get
     δt_stats  = _IncStats() # δ(stats.timestamp)
     t_stats   = None        # last stats.timestamp
     def rx_stats(ctx): # -> stats
@@ -869,7 +1156,7 @@ def _x_stats_srv(ctx, reqch: chan, conn: amari.Conn):
                          'ul_tx_time_err':            Σul.tx_time_err,
                          'ul_tx_time_notailtti':      Σul.tx_time_notailtti,
                          'ul_tx_time_notailtti_err':  Σul.tx_time_notailtti_err,
-                         'u;_tx_nsamples':            Σul.tx_nsamples,
+                         'ul_tx_nsamples':            Σul.tx_nsamples,
                     }
 
                 r = {'time':       ue_stats['time'],
@@ -993,3 +1280,9 @@ __debug = False
 def _debug(*argv):
     if __debug:
         print(*argv, file=sys.stderr)
+
+
+# _peek peeks first item from a sequence.
+# it is handy to use e.g. as _peek(dict.values()).
+def _peek(seq):
+    return next(iter(seq))

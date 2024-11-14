@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+# Copyright (C) 2022-2024  Nexedi SA and Contributors.
 #                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
@@ -655,8 +655,6 @@ def eutran_ip_throughput(calc): # -> IPThp[QCI][dl,ul]
     qulΣte = np.zeros(nqci, dtype=np.float64)
 
     for m in calc._miter():
-        τ = m['X.δT']
-
         for qci in range(nqci):
             dl_vol      = m["DRB.IPVolDl.QCI"]          [qci]
             dl_time     = m["DRB.IPTimeDl.QCI"]         [qci]

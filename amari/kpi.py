@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+# Copyright (C) 2022-2024  Nexedi SA and Contributors.
 #                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
@@ -225,11 +225,12 @@ def _handle_stats(logm, stats: xlog.Message, m_prev: kpi.Measurement):
     #   preserve statistical properties, but not more. See m_initfini below for
     #   details.
     #
-    # - it is possible to handle eNB with single cell only. This limitation
+    # - it is not easy to produce per-cell measurements. This limitation
     #   comes from the fact that in Amarisoft LTE stack S1-related counters
     #   come as "globals" ones, while e.g. RRC-related counters are "per-cell".
-    #   It is thus not possible to see how much S1 connection establishments
-    #   are associated with one particular cell if there are several of them.
+    #   It is thus hard to see how much S1 connection establishments are associated
+    #   with one particular cell if there are several of them. One S1 connection could
+    #   be even related to multiple cells simultaneously when carriers are aggregated.
     #
     # TODO also parse enb.log to fix those issues.
 
@@ -259,12 +260,20 @@ def _handle_stats(logm, stats: xlog.Message, m_prev: kpi.Measurement):
     # do init/fini correction if there was also third preceding stats message.
     m = logm._m.copy() # [stats_prev, stats)
 
-    # δcc(counter) tells how specified cumulative counter changed since last stats result.
+    # δcc(counter) tells how specified global cumulative counter changed since last stats result.
     def δcc(counter):
         old = _stats_cc(stats_prev, counter)
         new = _stats_cc(stats,      counter)
         if new < old:
             raise LogError(stats.timestamp, "cc %s↓  (%s → %s)" % (counter, old, new))
+        return new - old
+
+    # δcell_cc(counter) tells how specified per-cell cumulative counter changed since last stats result.
+    def δcell_cc(cell, counter):
+        old = _stats_cell_cc(stats_prev, cell, counter)
+        new = _stats_cell_cc(stats,      cell, counter)
+        if new < old:
+            raise LogError(stats.timestamp, "cc C%s.%s↓  (%s → %s)" % (cell, counter, old, new))
         return new - old
 
     # m_initfini populates m[init] and m[fini] from vinit and vfini values.
@@ -297,9 +306,24 @@ def _handle_stats(logm, stats: xlog.Message, m_prev: kpi.Measurement):
     # any logic error in data will be reported via LogError.
     try:
         # RRC: connection establishment
+        #
+        # Aggregate statistics for all cells because in E-RAB Accessibility we need
+        # aggregated RRC.ConnEstab* for whole eNB. It would be more logical to emit
+        # per-cell RRC statistics here and aggregate the result in KPI computation
+        # routine, but for now we are not delving to rework kpi.Measurement to
+        # contain per-cell values. For E-RAB Accessibility the end result is the
+        # same whether we do aggregation here or in kpi.Calc.erab_accessibility().
+        #
+        # TODO rework to emit per-cell measurements when/if we need per-cell KPIs
+        cells = set(stats['cells'].keys())  # NOTE cells are taken only from stats, not from stat_prev
+        δΣcell_rrc_connection_request = 0   # (if a cell disappears its counters stop to be accounted)
+        δΣcell_rrc_connection_setup_complete = 0
+        for cell in cells:
+            δΣcell_rrc_connection_request         += δcell_cc(cell, 'rrc_connection_request')
+            δΣcell_rrc_connection_setup_complete  += δcell_cc(cell, 'rrc_connection_setup_complete')
         m_initfini(
-            'RRC.ConnEstabAtt.sum',         δcc('rrc_connection_request'),
-            'RRC.ConnEstabSucc.sum',        δcc('rrc_connection_setup_complete'))
+            'RRC.ConnEstabAtt.sum',         δΣcell_rrc_connection_request,
+            'RRC.ConnEstabSucc.sum',        δΣcell_rrc_connection_setup_complete)
 
         # S1: connection establishment
         m_initfini(
@@ -334,37 +358,28 @@ def _handle_stats(logm, stats: xlog.Message, m_prev: kpi.Measurement):
 
 
 # _stats_check verifies stats message to have required structure.
-#
-# only configurations with one single cell are supported.
-# ( because else it would not be clear to which cell to associate e.g. global
-#   counters for S1 messages )
 def _stats_check(stats: xlog.Message):
-    cells = stats['cells']
-    if len(cells) != 1:
-        raise LogError(stats.timestamp, "stats describes %d cells;  but only single-cell configurations are supported" % len(cells))
-    cellname = list(cells.keys())[0]
-
     try:
         stats.get1("counters", dict).get1("messages", dict)
-        stats.get1("cells", dict).get1(cellname, dict).get1("counters", dict).get1("messages", dict)
+        cells = stats.get1("cells", dict)
+        for cell in cells:
+            cells.get1(cell, dict).get1("counters", dict).get1("messages", dict)
     except Exception as e:
         raise LogError(stats.timestamp, "stats: %s" % e)  from None
     return
 
-# _stats_cc returns specified cumulative counter from stats result.
+# _stats_cc returns specified global cumulative counter from stats result.
 #
-# counter may be both "global" or "per-cell".
 # stats is assumed to be already verified by _stats_check.
 def _stats_cc(stats: xlog.Message, counter: str):
-    cells = stats['cells']
-    cell = list(cells.values())[0]
+    return stats['counters']['messages'].get(counter, 0)
 
-    if counter.startswith("rrc_"):
-        cc_dict = cell ['counters']
-    else:
-        cc_dict = stats['counters']
-
-    return cc_dict['messages'].get(counter, 0)
+# _stats_cell_cc is like _stats_cc but returns specified per-cell cumulative counter from stats result.
+def _stats_cell_cc(stats: xlog.Message, cell: str, counter: str):
+    _ = stats['cells'].get(cell)
+    if _ is None:
+        return 0    # cell is absent in this stats
+    return _['counters']['messages'].get(counter, 0)
 
 
 # _handle_drb_stats handles next x.drb_stats xlog entry upon _read request.
@@ -465,9 +480,9 @@ def _drb_update(m: kpi.Measurement, drb_stats: xlog.Message):
             ΣT_hi   = ΣT + ΣT_err
             ΣTT_lo  = ΣTT - ΣTT_err
 
-            qvol[qci]      = 8*ΣB   # in bits
-            qtime[qci]     = (ΣT_hi + ΣTT_lo) / 2
-            qtime_err[qci] = (ΣT_hi - ΣTT_lo) / 2
+            qvol[qci]      += 8*ΣB   # in bits
+            qtime[qci]     += (ΣT_hi + ΣTT_lo) / 2
+            qtime_err[qci] += (ΣT_hi - ΣTT_lo) / 2
 
 
 # LogError(timestamp|None, *argv).

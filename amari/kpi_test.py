@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+# Copyright (C) 2022-2024  Nexedi SA and Contributors.
 #                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
@@ -104,12 +104,13 @@ class tLogMeasure:
             # also automatically initialize XXX.DRB.IPTimeX_err to 0.01 upon seeing DRB.IPTimeX
             # ( in tests we use precise values for tx_time and tx_time_notailtti
             #   with δ=0.02 - see drb_trx and jdrb_stats)
+            # this pre-initialization is correct only if there was single x.drb_stats message.
             n = _.group(1)
             if n.startswith('DRB.IPTime'):
                 ferr = "XXX.%s_err" % n
                 if isNA(t._mok[ferr+'.QCI']).all():
                     t._mok[ferr+'.QCI'][:] = 0
-                t._mok["%s.%s" % (ferr, _.group(2))] = ((vok + 0.01) - (vok - 0.01)) / 2  # ≈ 0.01
+                t._mok["%s.%s" % (ferr, _.group(2))] = drb_terr(vok)
 
         t._mok[field] = vok
 
@@ -244,28 +245,28 @@ def test_LogMeasure():
     # init           0     3     2     5     0
     # fini    ø ←─── 2     1←─── 2←─── 4←─── 1
     # fini'          0     3 ²   2 ²   3 ¹   0
-    tstats({'rrc_connection_request':           0,
-            'rrc_connection_setup_complete':    2}) # completions for previous uncovered period
+    tstats({'C1.rrc_connection_request':        0,
+            'C1.rrc_connection_setup_complete': 2}) # completions for previous uncovered period
     _('RRC.ConnEstabAtt.sum',       0)
     _('RRC.ConnEstabSucc.sum',      0)  # not 2
     # p2
-    tstats({'rrc_connection_request':           0 +3,  # 3 new initiations
-            'rrc_connection_setup_complete':    2 +1}) # 1 new completion
+    tstats({'C1.rrc_connection_request':        0 +3,  # 3 new initiations
+            'C1.rrc_connection_setup_complete': 2 +1}) # 1 new completion
     _('RRC.ConnEstabAtt.sum',       3)
     _('RRC.ConnEstabSucc.sum',      3)  # not 1
     # p3
-    tstats({'rrc_connection_request':           0+3 +2,  # 2 new initiations
-            'rrc_connection_setup_complete':    2+1 +2}) # 2 completions for p2
+    tstats({'C1.rrc_connection_request':        0+3 +2,  # 2 new initiations
+            'C1.rrc_connection_setup_complete': 2+1 +2}) # 2 completions for p2
     _('RRC.ConnEstabAtt.sum',       2)
     _('RRC.ConnEstabSucc.sum',      2)  # 2, but it is 2 - 2(for_p2) + 2(from_p4)
     # p4
-    tstats({'rrc_connection_request':           0+3+2 +5,  # 5 new initiations
-            'rrc_connection_setup_complete':    2+1+2 +4}) # 2 completions for p3 + 2 new
+    tstats({'C1.rrc_connection_request':        0+3+2 +5,  # 5 new initiations
+            'C1.rrc_connection_setup_complete': 2+1+2 +4}) # 2 completions for p3 + 2 new
     _('RRC.ConnEstabAtt.sum',       5)
     _('RRC.ConnEstabSucc.sum',      3)
     # p5
-    tstats({'rrc_connection_request':           0+3+2+5 +0,  # no new initiations
-            'rrc_connection_setup_complete':    2+1+2+4 +1}) # 1 completion for p4
+    tstats({'C1.rrc_connection_request':        0+3+2+5 +0,  # no new initiations
+            'C1.rrc_connection_setup_complete': 2+1+2+4 +1}) # 1 completion for p4
     _('RRC.ConnEstabAtt.sum',       0)
     _('RRC.ConnEstabSucc.sum',      0)
 
@@ -361,11 +362,20 @@ def test_LogMeasure():
     _('ERAB.EstabInitAttNbr.sum',   3) # currently same as S1SIG.ConnEstab
     _('ERAB.EstabInitSuccNbr.sum',  2) # ----//----
 
+    tdrb_stats(+0.5, {9: drb_trx(9.1,91,    9.2,92)})       # multiple d are accumulated
+    tdrb_stats(+0.6, {9: drb_trx(0.2, 2,    1.2,12)})       # ─d·S──ddd─S──
+    tdrb_stats(+0.7, {9: drb_trx(0.3, 3,    1.3,13)})       #   cont↑
+    tδstats({})
+    _('DRB.IPTimeDl.9', 9.1+0.2+0.3);   _('DRB.IPVolDl.9', 8*(91+2+3))
+    _('DRB.IPTimeUl.9', 9.2+1.2+1.3);   _('DRB.IPVolUl.9', 8*(92+12+13))
+    t._mok['XXX.DRB.IPTimeDl_err.9'] = drb_terr(9.1) + drb_terr(0.2) + drb_terr(0.3)
+    t._mok['XXX.DRB.IPTimeUl_err.9'] = drb_terr(9.2) + drb_terr(1.2) + drb_terr(1.3)
+
 
     # service detach/attach, connect failure, xlog failure
     tδstats({}) # untie from previous history
-    i, f = 'rrc_connection_request', 'rrc_connection_setup_complete'
-    I, F = 'RRC.ConnEstabAtt.sum',   'RRC.ConnEstabSucc.sum'
+    i, f = 'C1.rrc_connection_request', 'C1.rrc_connection_setup_complete'
+    I, F = 'RRC.ConnEstabAtt.sum',      'RRC.ConnEstabSucc.sum'
 
     tδstats({i:2, f:1})
     _(I, 2)
@@ -412,25 +422,54 @@ def test_LogMeasure():
     t.expect_nodata()
 
 
-# verify that only stats with single cell and expected structure are accepted.
+    # multiple cells
+    # TODO emit per-cell measurements instead of accumulating all cells
+    tstats({})
+    t.expect_nodata()
+    tstats({})
+    _('RRC.ConnEstabAtt.sum',       0)
+    _('RRC.ConnEstabSucc.sum',      0)
+    #  C1 appears
+    tstats({'C1.rrc_connection_request':    12,     'C1.rrc_connection_setup_complete': 11})
+    _('RRC.ConnEstabAtt.sum',       12)
+    _('RRC.ConnEstabSucc.sum',      11+1)
+    #  C2 appears
+    tstats({'C1.rrc_connection_request':    12+3,   'C1.rrc_connection_setup_complete': 11+3,
+            'C2.rrc_connection_request':    22,     'C2.rrc_connection_setup_complete': 21})
+    _('RRC.ConnEstabAtt.sum',       3+22)
+    _('RRC.ConnEstabSucc.sum',      -1+3+21+2)
+    #  C1 and C2 stays
+    tstats({'C1.rrc_connection_request':    12+3+3, 'C1.rrc_connection_setup_complete': 11+3+3,
+            'C2.rrc_connection_request':    22+4,   'C2.rrc_connection_setup_complete': 21+4})
+    _('RRC.ConnEstabAtt.sum',       3+4)
+    _('RRC.ConnEstabSucc.sum',      -2+3+4+2)
+    #  C1 disappears
+    tstats({'C2.rrc_connection_request':    22+4+4, 'C2.rrc_connection_setup_complete': 21+4+4})
+    _('RRC.ConnEstabAtt.sum',       4)
+    _('RRC.ConnEstabSucc.sum',      4-2)
+    #  C2 disappears
+    tstats({})
+    _('RRC.ConnEstabAtt.sum',       0)
+    _('RRC.ConnEstabSucc.sum',      0)
+
+    tevent("service detach")
+    t.expect_nodata()
+
+
+# verify that only stats with expected structure are accepted.
 @func
 def test_LogMeasure_badinput():
     t = tLogMeasure()
     defer(t.close)
     _ = t.expect1
 
-    cc = 'rrc_connection_request'
+    cc = 'C1.rrc_connection_request'
     CC = 'RRC.ConnEstabAtt.sum'
 
     # initial ok entries
     t.xlog( jstats(1, {}) )
     t.xlog( jstats(2, {cc: 2}) )
     t.xlog( jstats(3, {cc: 2+3}) )
-    # bad: not single cell
-    t.xlog('{"message":"stats", "utc":11, "cells": {}}')
-    t.xlog('{"message":"stats", "utc":12, "cells": {}}')
-    t.xlog('{"message":"stats", "utc":13, "cells": {"a": {}, "b": {}}}')
-    t.xlog('{"message":"stats", "utc":14, "cells": {"a": {}, "b": {}, "c": {}}}')
     # bad: no counters
     t.xlog('{"message":"stats", "utc":21, "counters": {"messages": {}}, "cells": {"1": {}}}')
     t.xlog('{"message":"stats", "utc":22, "counters": {"messages": {}}, "cells": {"1": {"counters": {}}}}')
@@ -466,31 +505,18 @@ def test_LogMeasure_badinput():
     read_nodata(0.02, 0.98) # attach-1
     readok(1, 2)            # 1-2
     readok(2, 3)            # 2-3
-    read_nodata(3, 8)       # 3-11
-
-    def tbadcell(τ, ncell):
-        with raises(LogError, match="t%s: stats describes %d cells;" % (τ, ncell) +
-                    "  but only single-cell configurations are supported"):
-            t.read()
-    tbadcell(11, 0)
-    read_nodata(11, 1)
-    tbadcell(12, 0)
-    read_nodata(12, 1)
-    tbadcell(13, 2)
-    read_nodata(13, 1)
-    tbadcell(14, 3)
+    read_nodata(3, 18)      # 3-21
 
     def tbadstats(τ, error):
         with raises(LogError, match="t%s: stats: %s" % (τ, error)):
             t.read()
-    read_nodata(14, 7)
-    tbadstats(21, ":10/cells/1 no `counters`")
+    tbadstats(21, ":6/cells/1 no `counters`")
     read_nodata(21, 1)
-    tbadstats(22, ":11/cells/1/counters no `messages`")
+    tbadstats(22, ":7/cells/1/counters no `messages`")
     read_nodata(22, 1)
-    tbadstats(23, ":12/ no `counters`")
+    tbadstats(23, ":8/ no `counters`")
     read_nodata(23, 1)
-    tbadstats(24, ":13/counters no `messages`")
+    tbadstats(24, ":9/counters no `messages`")
     read_nodata(24, 7)
 
     readok(31, 5)           # 31-32
@@ -511,7 +537,7 @@ def test_LogMeasure_cc_wraparound():
     defer(t.close)
     _ = t.expect1
 
-    cc = 'rrc_connection_request'
+    cc = 'C1.rrc_connection_request'
     CC = 'RRC.ConnEstabAtt.sum'
 
     t.xlog( jstats(1, {}) )
@@ -545,7 +571,7 @@ def test_LogMeasure_sync():
     defer(t.close)
     _ = t.expect1
 
-    cc = 'rrc_connection_request'
+    cc = 'C1.rrc_connection_request'
     CC = 'RRC.ConnEstabAtt.sum'
 
     t.xlog( jstats(1, {}) )
@@ -568,30 +594,46 @@ def test_LogMeasure_sync():
 
 
 # jstats returns json-encoded stats message corresponding to counters dict.
+#
+# if a counter goes as "Cxxx.yyy" it is emitted as counter yyy of cell xxx in the output.
 # τ goes directly to stats['utc'] as is.
 def jstats(τ, counters):  # -> str
-    g_cc    = {}  # global
-    cell_cc = {}  # per-cell
+    g_cc    = {}  # global cumulative counters
+    cells   = {}  # .cells
 
     for cc, value in counters.items():
-        if cc.startswith("rrc_"):
-            cell_cc[cc] = value
+        _ = re.match(r"^C([^.]+)\.(.+)$", cc)
+        if _ is not None:
+            cell = _.group(1)
+            cc   = _.group(2)
+            cells.setdefault(cell, {})          \
+                 .setdefault("counters", {})    \
+                 .setdefault("messages", {})    \
+                 [cc] = value
         else:
             g_cc[cc] = value
 
     s = {
         "message":  "stats",
         "utc":      τ,
-        "cells":    {"1": {"counters": {"messages": cell_cc}}},
+        "cells":    cells,
         "counters": {"messages": g_cc},
     }
 
     return json.dumps(s)
 
 def test_jstats():
-    assert jstats(0, {}) == '{"message": "stats", "utc": 0, "cells": {"1": {"counters": {"messages": {}}}}, "counters": {"messages": {}}}'
-    assert jstats(123.4, {"rrc_x": 1, "s1_y": 2, "rrc_z": 3, "x2_zz": 4}) == \
+    assert jstats(0, {}) == '{"message": "stats", "utc": 0, "cells": {}, "counters": {"messages": {}}}'
+    assert jstats(123.4, {"C1.rrc_x": 1, "s1_y": 2, "C1.rrc_z": 3, "x2_zz": 4}) == \
             '{"message": "stats", "utc": 123.4, "cells": {"1": {"counters": {"messages": {"rrc_x": 1, "rrc_z": 3}}}}, "counters": {"messages": {"s1_y": 2, "x2_zz": 4}}}'
+
+    # multiple cells
+    assert jstats(432.1, {"C1.rrc_x": 11, "C2.rrc_y": 22, "C3.xyz": 33, "C1.abc": 111, "xyz": 44}) == \
+            '{"message": "stats", "utc": 432.1, "cells": {'                 + \
+            '"1": {"counters": {"messages": {"rrc_x": 11, "abc": 111}}}, '  + \
+            '"2": {"counters": {"messages": {"rrc_y": 22}}}, '              + \
+            '"3": {"counters": {"messages": {"xyz": 33}}}}, '               + \
+            '"counters": {"messages": {"xyz": 44}}}'
 
 
 # jdrb_stats, similarly to jstats, returns json-encoded x.drb_stats message
@@ -603,7 +645,7 @@ def jdrb_stats(τ, qci_dlul):  # -> str
         assert set(dlul.keys()) == {"dl_tx_bytes", "dl_tx_time", "dl_tx_time_notailtti",
                                     "ul_tx_bytes", "ul_tx_time", "ul_tx_time_notailtti"}
         dlul["dl_tx_time_err"] = 0              # original time is simulated to be
-        dlul["ul_tx_time_err"] = 0              # measured precisely in tess.
+        dlul["ul_tx_time_err"] = 0              # measured precisely in tests.
         dlul["dl_tx_time_notailtti_err"] = 0    # ----//----
         dlul["ul_tx_time_notailtti_err"] = 0    #
 
@@ -639,6 +681,14 @@ def drb_trx(dl_tx_time, dl_tx_bytes, ul_tx_time, ul_tx_bytes):
     return {"dl_tx_bytes": dl_tx_bytes, "dl_tx_time": dl_tx_time + 0.01, "dl_tx_time_notailtti": dl_tx_time - 0.01,
             "ul_tx_bytes": ul_tx_bytes, "ul_tx_time": ul_tx_time + 0.01, "ul_tx_time_notailtti": ul_tx_time - 0.01}
 
+
+# drb_terr returns what XXX.DRB.IPTimeX_err should be for given DRB.IPTimeX
+# it is ≈ 0.01 but due to loss of float-point precision is a bit different for
+# particular value of time.
+# ( in tests we use precise values for tx_time and tx_time_notailtti
+#   with δ=0.02 - see drb_trx and jdrb_stats)
+def drb_terr(t):
+    return ((t + 0.01) - (t - 0.01)) / 2  # ≈ 0.01
 
 # ionone returns empty data source.
 def ionone():
