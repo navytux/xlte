@@ -21,9 +21,11 @@
 from __future__ import print_function, division, absolute_import
 
 from xlte.kpi import Calc, MeasurementLog, Measurement, ΣMeasurement, Interval, \
-                     NA, isNA, Σqci, Σcause, nqci
+                     Stat, NA, isNA, Σqci, Σcause, nqci
 import numpy as np
 from pytest import raises
+
+ms = 1e-3
 
 
 def test_Measurement():
@@ -44,6 +46,8 @@ def test_Measurement():
     _('DRB.IPVolDl.sum')                # int64
     _('DRB.IPTimeDl.7')                 # .QCI alias
     _('DRB.IPTimeDl.QCI')               # .QCI array
+    _('DRB.IPLatDl.7')                  # .QCI alias to Stat
+    _('DRB.IPLatDl.QCI')                # .QCI array of Stat
     # everything automatically
     for name in m.dtype.names:
         _(name)
@@ -66,9 +70,21 @@ def test_Measurement():
             continue
         assert m['DRB.IPVolDl.%d' % k] == 0
         assert m['DRB.IPVolDl.QCI'][k] == 0
+    m['DRB.IPLatDl.QCI'][:]['avg'] = 0
+    m['DRB.IPLatDl.QCI'][:]['min'] = 0
+    m['DRB.IPLatDl.QCI'][:]['max'] = 0
+    m['DRB.IPLatDl.QCI'][:]['n']   = 0
+    m['DRB.IPLatDl.QCI'][3]['avg'] = 33
+    m['DRB.IPLatDl.QCI'][3]['n']   = 123
+    m['DRB.IPLatDl.4']['avg'] = 44
+    m['DRB.IPLatDl.4']['n']   = 432
+    m['DRB.IPLatDl.8']['avg'] = NA(m['DRB.IPLatDl.8']['avg'].dtype)
+    m['DRB.IPLatDl.8']['n']   = NA(m['DRB.IPLatDl.8']['n']  .dtype)
+
 
     # str/repr
-    assert repr(m) == "Measurement(RRC.ConnEstabAtt.sum=17, DRB.IPVolDl.QCI={5:55 7:ø 9:99}, S1SIG.ConnEstabAtt=123)"
+    assert repr(m) == "Measurement(RRC.ConnEstabAtt.sum=17, DRB.IPLatDl.QCI={3:<0.0 33.0 0.0>·123 4:<0.0 44.0 0.0>·432 8:<0.0 ø 0.0>·ø}, DRB.IPVolDl.QCI={5:55 7:ø 9:99}, S1SIG.ConnEstabAtt=123)"
+    assert repr(m['DRB.IPLatDl.3']) == "Stat(0.0, 33.0, 0.0, 123, dtype=float64)"
     s = str(m)
     assert s[0]  == '('
     assert s[-1] == ')'
@@ -77,6 +93,7 @@ def test_Measurement():
     vok[m.dtype.names.index("RRC.ConnEstabAtt.sum")]   = "17"
     vok[m.dtype.names.index("S1SIG.ConnEstabAtt")]     = "123"
     vok[m.dtype.names.index("DRB.IPVolDl.QCI")]        = "{5:55 7:ø 9:99}"
+    vok[m.dtype.names.index("DRB.IPLatDl.QCI")]        = "{3:<0.0 33.0 0.0>·123 4:<0.0 44.0 0.0>·432 8:<0.0 ø 0.0>·ø}"
     assert v == vok
 
     # verify that time fields has enough precision
@@ -506,12 +523,14 @@ def test_Calc_aggregate():
     m1['X.δT']      = 2
     m1['S1SIG.ConnEstabAtt'] = 12                               # Tcc
     m1['ERAB.SessionTimeUE'] = 1.2                              # Ttime
+    m1['DRB.IPLatDl.7']      = Stat(4*ms, 7.32*ms, 25*ms, 17)   # Stat
 
     m2 = Measurement()
     m2['X.Tstart']  = 5 # NOTE [3,5) is NA hole
     m2['X.δT']      = 3
     m2['S1SIG.ConnEstabAtt'] = 11
     m2['ERAB.SessionTimeUE'] = 0.7
+    m2['DRB.IPLatDl.7']      = Stat(3*ms, 5.23*ms, 11*ms, 11)
 
     mlog.append(m1)
     mlog.append(m2)
@@ -532,6 +551,9 @@ def test_Calc_aggregate():
     assert M['ERAB.SessionTimeUE']['value'] == 1.2 + 0.7
     assert M['ERAB.SessionTimeUE']['τ_na']  == 5
 
+    assert M['DRB.IPLatDl.7']['value']  == Stat(3*ms, (7.32*17 + 5.23*11)/(17+11)*ms, 25*ms, 17+11)
+    assert M['DRB.IPLatDl.7']['τ_na']   == 5
+
 
     # assert that everything else is NA with τ_na == 10
     def _(name):
@@ -542,7 +564,7 @@ def test_Calc_aggregate():
         assert f['τ_na'] == 10
     for name in M.dtype.names:
         if name not in ('X.Tstart', 'X.δT', 'S1SIG.ConnEstabAtt',
-                        'ERAB.SessionTimeUE'):
+                        'ERAB.SessionTimeUE', 'DRB.IPLatDl.7'):
             _(name)
 
 
