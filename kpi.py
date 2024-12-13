@@ -200,8 +200,12 @@ class Measurement(np.void):
         ('X.Tstart',                        Ttime),     # when the measurement started
         ('X.δT',                            Ttime),     # time interval during which the measurement was made
 
-        # below come values/events as specified by TS 32.425 and TS 32.450
-        # NOTE all .QCI and .CAUSE are expanded from outside.
+        # below comes definition of values/events as specified by TS 32.425 and TS 32.450
+        #
+        # - .QCI   suffix means a value comes as array of per-QCI values.
+        # - .CAUSE suffix means a value comes as array of per-CAUSE values.
+        #
+        # NOTE both .QCI and .CAUSE are expanded from outside.
         #
         # NAME                            TYPE/DTYPE      UNIT      TS 32.425 reference + ...
         ('RRC.ConnEstabAtt.CAUSE',          Tcc),       # 1         4.1.1.1
