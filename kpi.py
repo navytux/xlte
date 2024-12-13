@@ -21,7 +21,7 @@
 
 - Calc is KPI calculator. It can be instantiated on MeasurementLog and time
   interval over which to perform computations. Use Calc methods such as
-  .erab_accessibility() and .eutran_ip_throughput() to compute KPIs, and .sum()
+  .erab_accessibility() and .eutran_ip_throughput() to compute KPIs, and .aggregate()
   to compute aggregated measurements.
 
 - MeasurementLog maintains journal with result of measurements. Use .append()
@@ -54,6 +54,8 @@ from __future__ import print_function, division, absolute_import
 import numpy as np
 from golang import func
 
+import warnings
+
 
 # Calc provides way to compute KPIs over given measurement data and time interval.
 #
@@ -71,7 +73,7 @@ from golang import func
 #       ──────|─────|────[────|────)──────|──────|────────>
 #                    ←─ τ_lo      τ_hi ──→          time
 #
-# It is also possible to merely aggregate measured values via .sum() .
+# It is also possible to merely aggregate measured values via .aggregate() .
 #
 # See also: MeasurementLog, Measurement, ΣMeasurement.
 class Calc:
@@ -224,11 +226,11 @@ class Interval(np.void):
 # It is similar to Measurement, but each value comes accompanied with
 # information about how much time there was no data for that field:
 #
-#       Σ[f].value = Σ Mi[f]     if Mi[f] ≠ NA
-#                    i
+#       Σ[f].value = Aggregate Mi[f]        if Mi[f] ≠ NA
+#                           i
 #
-#       Σ[f].τ_na  = Σ Mi[X.δT]  if Mi[f] = NA
-#                    i
+#       Σ[f].τ_na  =        Σ  Mi[X.δT]     if Mi[f] = NA
+#                           i
 class ΣMeasurement(np.void):
     _ = []
     for name in Measurement._dtype.names:
@@ -696,10 +698,10 @@ def eutran_ip_throughput(calc): # -> IPThp[QCI][dl,ul]
     return thp
 
 
-# sum aggregates values of all Measurements in covered time interval.
+# aggregate aggregates values of all Measurements in covered time interval.
 # TODO tests
 @func(Calc)
-def sum(calc): # -> ΣMeasurement
+def aggregate(calc): # -> ΣMeasurement
     Σ = ΣMeasurement()
     Σ['X.Tstart'] = calc.τ_lo
     Σ['X.δT']     = calc.τ_hi - calc.τ_lo
@@ -721,6 +723,12 @@ def sum(calc): # -> ΣMeasurement
                 Σ[field]['value'] += v
 
     return Σ
+
+# sum is deprecated alias to aggregate.
+@func(Calc)
+def sum(calc):
+    warnings.warn("Calc.sum is deprecated -> use Calc.aggregate instead", DeprecationWarning, stacklevel=4)
+    return calc.aggregate()
 
 
 # _miter iterates through [.τ_lo, .τ_hi) yielding Measurements.
