@@ -137,6 +137,24 @@ class Stat(np.void):
             ('max', dtype),
             ('n',   np.int64)]))
 
+# StatT[dtype] represents result of statistical profiling with time-based sampling
+# for a value with specified dtype.
+#
+# It is organized as NumPy structured scalar with avg, min and max fields.
+#
+# NOTE contrary to Stat there is no n field and containing Measurement.X.δT
+#      should be taken to know during which time period the profile was collected.
+#
+# It is used inside Measurement for e.g. DRB.UEActive .
+class StatT(np.void):
+    # _dtype_for returns dtype that StatT[dtype] will use.
+    @classmethod
+    def _dtype_for(cls, dtype):
+        return np.dtype((cls, [
+            ('avg', np.float64),    # see avg note in Stat
+            ('min', dtype),
+            ('max', dtype)]))
+
 
 # Measurement represents set of measured values and events observed and counted
 # during one particular period of time.
@@ -175,6 +193,7 @@ class Measurement(np.void):
     Tcc    = np.int32   # cumulative counter
     Ttime  = np.float64 # time is represented in seconds since epoch
     S  = Stat ._dtype_for   # statistical profile with arbitrary sampling
+    St = StatT._dtype_for   # statistical profile with time-based sampling
 
     # _dtype defines measured values and events.
     _dtype = np.dtype([
@@ -199,6 +218,8 @@ class Measurement(np.void):
 
         ('DRB.PdcpSduBitrateUl.QCI',        np.float64),# bit/s     4.4.1.1                 NOTE not kbit/s
         ('DRB.PdcpSduBitrateDl.QCI',        np.float64),# bit/s     4.4.1.2                 NOTE not kbit/s
+
+        ('DRB.UEActive',                 St(np.int32)), # 1         4.4.2.4  36.314:4.1.3.3
 
         ('DRB.IPLatDl.QCI',               S(Ttime)),    # s         4.4.5.1  32.450:6.3.2   NOTE not ms
 
@@ -225,7 +246,7 @@ class Measurement(np.void):
         ('PEE.Energy',                      np.float64),# J         4.12.2                  NOTE not kWh
     ])
 
-    del S
+    del S, St
 
 
 # Interval is NumPy structured scalar that represents [lo,hi) interval.
@@ -302,6 +323,15 @@ def __new__(cls, min, avg, max, n, dtype=np.float64):
     s['avg'] = avg
     s['max'] = max
     s['n']   = n
+    return s
+
+# StatT() creates new StatT instance with specified values and dtype.
+@func(StatT)
+def __new__(cls, min, avg, max, dtype=np.float64):
+    s = _newscalar(cls, cls._dtype_for(dtype))
+    s['min'] = min
+    s['avg'] = avg
+    s['max'] = max
     return s
 
 
@@ -405,11 +435,24 @@ def __repr__(s):
     return "Stat(%s, %s, %s, %s, dtype=%s)" % (_vstr(s['min']), _vstr(s['avg']),
                 _vstr(s['max']), _vstr(s['n']), s['min'].dtype)
 
+# __repr__ returns StatT(min, avg, max, dtype=...)
+# NA values are represented as "ø".
+@func(StatT)
+def __repr__(s):
+    return "StatT(%s, %s, %s, dtype=%s)" % (_vstr(s['min']), _vstr(s['avg']),
+                _vstr(s['max']), s['min'].dtype)
+
 # __str__ returns "<min avg max>·n"
 # NA values are represented as "ø".
 @func(Stat)
 def __str__(s):
     return "<%s %s %s>·%s" % (_vstr(s['min']), _vstr(s['avg']), _vstr(s['max']), _vstr(s['n']))
+
+# __str__ returns "<min avg max>"
+# NA values are represented as "ø".
+@func(StatT)
+def __str__(s):
+    return "<%s %s %s>" % (_vstr(s['min']), _vstr(s['avg']), _vstr(s['max']))
 
 
 # _vstr returns string representation of scalar or subarray v.
@@ -804,6 +847,13 @@ def aggregate(calc): # -> ΣMeasurement
 
             if isinstance(v, np.number):
                 Σf['value'] += v
+
+            elif isinstance(v, StatT):
+                Σv['min'] = xmin(Σv['min'], v['min'])
+                Σv['max'] = xmax(Σv['max'], v['max'])
+                # TODO better sum everything and then divide as a whole to avoid loss of precision
+                Σv['avg'], _ = xavg(Σv['avg'], m['X.Tstart'] - Σ['X.Tstart'] - Σf['τ_na'],
+                                     v['avg'], m['X.δT'])
 
             elif isinstance(v, Stat):
                 Σv['min'] = xmin(Σv['min'], v['min'])
