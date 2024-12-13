@@ -974,10 +974,13 @@ def _i2pc(x: Interval): # -> Interval
 
 # _newscalar creates new NumPy scalar instance with specified type and dtype.
 def _newscalar(typ, dtype):
-    _ = np.zeros(shape=(), dtype=(typ, dtype))
+    dtyp = np.dtype((typ, dtype))   # dtype with .type adjusted to be typ
+    assert dtyp == dtype
+    assert dtyp.type is typ
+    _ = np.zeros(shape=(), dtype=dtyp)
     s = _[()]
     assert type(s) is typ
-    assert s.dtype == dtype
+    assert s.dtype is dtyp
     return s
 
 
