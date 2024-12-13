@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Copyright (C) 2022-2023  Nexedi SA and Contributors.
+# Copyright (C) 2022-2024  Nexedi SA and Contributors.
 #                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
@@ -20,7 +20,8 @@
 
 from __future__ import print_function, division, absolute_import
 
-from xlte.kpi import Calc, MeasurementLog, Measurement, Interval, NA, isNA, Σqci, Σcause, nqci
+from xlte.kpi import Calc, MeasurementLog, Measurement, ΣMeasurement, Interval, \
+                     NA, isNA, Σqci, Σcause, nqci
 import numpy as np
 from pytest import raises
 
@@ -494,6 +495,55 @@ def test_Calc_eutran_ip_throughput():
     for qci in set(range(nqci)).difference({5,7,9}):
         assert thp[qci]['dl'] == I(0)
         assert thp[qci]['ul'] == I(0)
+
+
+# verify Calc.aggregate .
+def test_Calc_aggregate():
+    mlog = MeasurementLog()
+
+    m1 = Measurement()
+    m1['X.Tstart']  = 1
+    m1['X.δT']      = 2
+    m1['S1SIG.ConnEstabAtt'] = 12                               # Tcc
+    m1['ERAB.SessionTimeUE'] = 1.2                              # Ttime
+
+    m2 = Measurement()
+    m2['X.Tstart']  = 5 # NOTE [3,5) is NA hole
+    m2['X.δT']      = 3
+    m2['S1SIG.ConnEstabAtt'] = 11
+    m2['ERAB.SessionTimeUE'] = 0.7
+
+    mlog.append(m1)
+    mlog.append(m2)
+
+    calc = Calc(mlog, 0, 10)
+    assert calc.τ_lo == 0
+    assert calc.τ_hi == 10
+
+    M = calc.aggregate()
+    assert isinstance(M, ΣMeasurement)
+
+    assert M['X.Tstart'] == 0
+    assert M['X.δT']     == 10
+
+    assert M['S1SIG.ConnEstabAtt']['value'] == 12 + 11
+    assert M['S1SIG.ConnEstabAtt']['τ_na']  == 5    # [0,1) [3,5) [8,10)
+
+    assert M['ERAB.SessionTimeUE']['value'] == 1.2 + 0.7
+    assert M['ERAB.SessionTimeUE']['τ_na']  == 5
+
+
+    # assert that everything else is NA with τ_na == 10
+    def _(name):
+        f = M[name]
+        if f.shape != ():
+            return  # don't check X.QCI - rely on aliases
+        assert isNA(f['value'])
+        assert f['τ_na'] == 10
+    for name in M.dtype.names:
+        if name not in ('X.Tstart', 'X.δT', 'S1SIG.ConnEstabAtt',
+                        'ERAB.SessionTimeUE'):
+            _(name)
 
 
 # verify Σqci.

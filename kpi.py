@@ -699,7 +699,6 @@ def eutran_ip_throughput(calc): # -> IPThp[QCI][dl,ul]
 
 
 # aggregate aggregates values of all Measurements in covered time interval.
-# TODO tests
 @func(Calc)
 def aggregate(calc): # -> ΣMeasurement
     Σ = ΣMeasurement()
