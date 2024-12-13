@@ -234,10 +234,10 @@ class Interval(np.void):
 class ΣMeasurement(np.void):
     _ = []
     for name in Measurement._dtype.names:
-        typ = Measurement._dtype.fields[name][0].type
+        dtyp = Measurement._dtype.fields[name][0]
         if not name.startswith('X.'):   # X.Tstart, X.δT
-            typ = np.dtype([('value', typ), ('τ_na', Measurement.Ttime)])
-        _.append((name, typ))
+            dtyp = np.dtype([('value', dtyp), ('τ_na', Measurement.Ttime)])
+        _.append((name, dtyp))
     _dtype = np.dtype(_)
     del _
 
