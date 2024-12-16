@@ -136,7 +136,7 @@ def main():
     mhead = mlog.data()[0]
     mtail = mlog.data()[-1]
     calc_total = kpi.Calc(mlog, mhead['X.Tstart'], mtail['X.Tstart']+mtail['X.δT'])
-    Σ = calc_total.sum()
+    Σ = calc_total.aggregate()
     print_ΣMeasurement(Σ)
 
 
