@@ -971,7 +971,7 @@ def _x_stats_srv(ctx, reqch: chan, conn: amari.Conn):
     # both ue_get and stats queries, due to overall 100Hz rate-limiting, ue_get
     # would be retrieved at only 50Hz rate. With separate connection for stats
     # we can retrieve both ue_get and stats each at 100Hz simultaneously.
-    conn_stats = amari.connect(ctx, conn.wsuri)
+    conn_stats = amari.connect(ctx, conn.wsuri, password=conn.password)
     defer(conn_stats.close)
     rtt_stats = _IncStats() # like rtt_ue_stats but for stats instead of ue_get
     δt_stats  = _IncStats() # δ(stats.timestamp)

@@ -418,7 +418,7 @@ class _XMsgServer:
         # main logger queries stats, and x.drb_stats server also queries stats
         # internally, then data received by main logger will cover only small
         # random period of time instead of full wanted period.
-        conn2 = amari.connect(ctx, conn.wsuri)
+        conn2 = amari.connect(ctx, conn.wsuri, password=conn.password)
         defer(conn2.close)
         xsrv._func(ctx, xsrv._reqch, conn2)
 

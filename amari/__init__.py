@@ -108,6 +108,7 @@ class Conn:
             raise ConnError("handshake") from ex
 
         conn.wsuri = wsuri
+        conn.password = password
         conn._ws = ws
         conn.srv_ready_msg   = msg0
         conn.t_srv_ready_msg = t_msg0
