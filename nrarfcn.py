@@ -1,5 +1,5 @@
-# Copyright (C) 2023  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2023-2025  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -129,21 +129,21 @@ def dl2ssb(dl_nr_arfcn, band): # -> ssb_nr_arfcn, max_ssb_scs_khz
     f = frequency(nrarfcn=dl_nr_arfcn)
     _trace('f   %.16g' % f)
 
-    # query all SSB SCS available in this band
+    # query all SS raster entries available in this band
     if isinstance(band, int):
         band = 'n%d' % band
     tab_fr1 = nr.tables.applicable_ss_raster_fr1.table_applicable_ss_raster_fr1()
     tab_fr2 = nr.tables.applicable_ss_raster_fr2.table_applicable_ss_raster_fr2()
-    scs_v = []
+    try_v = []  # of _SSRasterTabEntry
     for tab in (tab_fr1, tab_fr2):
         for row in tab.data:
             if tab.get_cell(row, 'band') == band:
-                scs_v.append( tab.get_cell(row, 'scs') )
+                try_v.append( _SSRasterTabEntry(tab, row) )
 
     # for each scs↓ try to find suitable sync point
-    for scs_khz in sorted(scs_v, reverse=True):
-        _trace('trying scs %r' % scs_khz)
-        scs = scs_khz / 1000  # khz -> mhz
+    for t in sorted(try_v, key=lambda _: _.scs, reverse=True):
+        _trace('trying %s' % t)
+        scs = t.scs / 1000  # khz -> mhz
 
         # locate nearby point on global sync raster and further search around it
         # until sync point aligns to be multiple of scs
@@ -157,13 +157,51 @@ def dl2ssb(dl_nr_arfcn, band): # -> ssb_nr_arfcn, max_ssb_scs_khz
             δf = f_sync - f
             q, r = divmod(δf, scs)
             r_scs = r / scs
-            _trace('gscn %d\tf_sync %.16g (%d)  δf %+.3f  //scs %d  %%scs %.16g·scs' % (gscn, f_sync, nr.get_nrarfcn(f_sync), δf, q, r_scs))
-            if abs(r_scs - round(r_scs)) < 1e-5:
-                _trace('-> %d %d' % (f_sync_arfcn, scs_khz))
-                return f_sync_arfcn, scs_khz
-            gscn += (+1 if δf > 0  else  -1)
+            # if f_sync is good we can yield it only if gscn ∈ allowed set
+            if t.has_gscn(gscn):
+                _trace('gscn %d\tf_sync %.16g (%d)  δf %+.3f  //scs %d  %%scs %.16g·scs' % (gscn, f_sync, nr.get_nrarfcn(f_sync), δf, q, r_scs))
+                if abs(r_scs - round(r_scs)) < 1e-5:
+                    _trace('-> %d %d' % (f_sync_arfcn, t.scs))
+                    return f_sync_arfcn, t.scs
+            gscn += (+1 if δf >= 0  else  -1)
 
     raise KeyError('dl2ssb %r %s: cannot find SSB frequency that is both on GSR and aligns from dl modulo SSB SCS of the given band' % (dl_nr_arfcn, band))
+
+# _SSRasterTabEntry serves dl2ssb by representing one entry from FR1 or FR2 SS raster entries table.
+class _SSRasterTabEntry:
+    __slots__ = ('band', 'scs', 'block_pattern', 'gscn_first', 'step_size', 'gscn_last', 'note')
+
+    def __init__(tabe, tab, row):
+        for key in tabe.__slots__:
+            setattr(tabe, key, tab.get_cell(row, key))
+        assert type(tabe.note) is set  or  tabe.note == {},  repr(tabe)
+        if len(tabe.note) > 0:
+            assert tabe.gscn_first == tabe.gscn_last == tabe.step_size == 0,  repr(tabe)
+        else:
+            assert tabe.gscn_first != 0,  repr(tabe)
+            assert tabe.gscn_last  != 0,  repr(tabe)
+            assert tabe.step_size  != 0,  repr(tabe)
+
+    # has_gscn returns whether table entry covers given gscn.
+    def has_gscn(tabe, gscn):
+        if len(tabe.note) > 0:
+            ok = tabe.note
+        else:
+            ok = range(tabe.gscn_first, tabe.gscn_last+1, tabe.step_size)
+        return (gscn in ok)
+
+    def __str__(tabe):
+        s = '%s %s·scs  %s  ' % (tabe.band, tabe.scs, tabe.block_pattern)
+        if len(tabe.note) > 0:
+            s += '%r' % (tabe.note,)
+        else:
+            s += '%d-<%d>-%d' % (tabe.gscn_first, tabe.step_size, tabe.gscn_last)
+        return s
+
+    def __repr__(tabe):
+        return '_SSRasterTabEntry('  + \
+            ', '.join('%s=%r' % (k, getattr(tabe, k))  for k in tabe.__slots__)  + \
+            ')'
 
 
 # frequency returns frequency corresponding to DL or UL NR-ARFCN.
