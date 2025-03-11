@@ -19,16 +19,33 @@
 
 from xlte.nrarfcn import frequency, dl2ul, ul2dl, dl2ssb
 from xlte.nrarfcn import nr
+from xlte import nrarfcn
 
 from pytest import raises
 
 
 # verify nrarfcn-related calculations wrt several points.
 def test_nrarfcn():
+    # _nrarfcn converts f to nrarfcn.
+    # it also verifies conversion behaviour for f±ε.
+    # f must be on nrarfcn raster.
+    def _nrarfcn(f):  # -> nrarfcn
+        n = nrarfcn.nrarfcn(f)
+        def check_reject(f, **kw):
+            with raises(ValueError, match="is not on NR-ARFCN raster"):
+                nrarfcn.nrarfcn(f, **kw)
+        ε = 0.001 # 1 kHz
+        check_reject(f+ε);  check_reject(f+ε, nearby=False)
+        check_reject(f-ε);  check_reject(f-ε, nearby=False)
+        assert nrarfcn.nrarfcn(f+ε, nearby=True) == n
+        assert nrarfcn.nrarfcn(f-ε, nearby=True) == n
+        return n
+
     def _(band, dl_nr_arfcn, ul_nr_arfcn, fdl, ful, rf_mode, ssb_nr_arfcn, max_ssb_scs_khz):
         assert rf_mode == nr.get_duplex_mode(band).upper()
         if dl_nr_arfcn is not None:
             assert frequency(dl_nr_arfcn) == fdl
+            assert _nrarfcn(fdl) == dl_nr_arfcn
             if ul_nr_arfcn is not None:
                 assert dl2ul(dl_nr_arfcn, band) == ul_nr_arfcn
             else:
@@ -42,6 +59,7 @@ def test_nrarfcn():
 
         if ul_nr_arfcn is not None:
             assert frequency(ul_nr_arfcn) == ful
+            assert _nrarfcn(ful) == ul_nr_arfcn
             if dl_nr_arfcn is not None:
                 assert ul2dl(ul_nr_arfcn, band) == dl_nr_arfcn
             else:

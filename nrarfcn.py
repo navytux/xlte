@@ -21,6 +21,7 @@
 It complements pypi.org/project/nrarfcn and provides the following additional utilities:
 
 - frequency converts NR-ARFCN to frequency.
+- nrarfcn converts frequency to NR-ARFCN.
 - dl2ul and ul2dl convert between DL NR-ARFCN and UL NR-ARFCN corresponding to
   each other in particular band.
 - dl2ssb returns SSB NR-ARFCN that is located nearby DL NR-ARFCN on Global Synchronization Raster.
@@ -207,6 +208,17 @@ class _SSRasterTabEntry:
 # frequency returns frequency corresponding to DL or UL NR-ARFCN.
 def frequency(nrarfcn): # -> freq (MHz)
     return nr.get_frequency(nrarfcn)
+
+
+# nrarfcn returns NR-ARFCN that corresponds to frequency freq in MHz.
+#
+# By default the convertion is precise, but if nearby=True closest NR-ARFCN is returned.
+def nrarfcn(freq, nearby=False):  # -> NR-ARFCN | ValueError
+    n = nr.get_nrarfcn(freq)  # get_nrarfcn returns nearby nrarfcn
+    if not nearby:
+        if frequency(n) != freq:
+            raise ValueError('frequency=%r MHz is not on NR-ARFCN raster' % freq)
+    return n
 
 
 _debug = False

@@ -1,5 +1,5 @@
-# Copyright (C) 2023  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2023-2025  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -25,8 +25,24 @@ from pytest import raises
 
 # verify earfcn-related calculations wrt several points.
 def test_earfcn():
+    # _earfcn converts f to earfcn on specified band.
+    # it also verifies conversion behaviour for f±ε.
+    # f must be on earfcn raster.
+    def _earfcn(f, band):  # -> earfcn
+        e = earfcn.earfcn(f, band)
+        def check_reject(f, **kw):
+            with raises(ValueError, match="is not on EARFCN raster"):
+                earfcn.earfcn(f, band, **kw)
+        ε = 0.01 # 10 kHz
+        check_reject(f+ε);  check_reject(f+ε, nearby=False)
+        check_reject(f-ε);  check_reject(f-ε, nearby=False)
+        assert earfcn.earfcn(f+ε, band, nearby=True) == e
+        assert earfcn.earfcn(f-ε, band, nearby=True) == e
+        return e
+
     def _(band, dl_earfcn, ul_earfcn, fdl, ful, rf_mode, fdl_lo, fdl_hi_, ful_lo, ful_hi_):
         assert frequency(dl_earfcn) == fdl
+        assert _earfcn(fdl, band) == dl_earfcn
         if ul_earfcn is not None:
             assert dl2ul(dl_earfcn) == ul_earfcn
         else:
@@ -41,6 +57,7 @@ def test_earfcn():
         assert isdl  == True
         if ul_earfcn is not None:
             assert frequency(ul_earfcn) == ful
+            assert _earfcn(ful, band) == ul_earfcn
             assert ul2dl(ul_earfcn) == dl_earfcn
             b_, isdl_ = earfcn.band(ul_earfcn)
             assert isdl_ == (rf_mode == 'TDD')

@@ -1,5 +1,5 @@
-# Copyright (C) 2023  Nexedi SA and Contributors.
-#                     Kirill Smelkov <kirr@nexedi.com>
+# Copyright (C) 2023-2025  Nexedi SA and Contributors.
+#                          Kirill Smelkov <kirr@nexedi.com>
 #
 # This program is free software: you can Use, Study, Modify and Redistribute
 # it under the terms of the GNU General Public License version 3, or (at your
@@ -19,6 +19,7 @@
 """Package xlte.earfcn helps to do computations with LTE bands, frequencies and EARFCN numbers.
 
 - frequency converts EARFCN to frequency.
+- earfcn converts frequency to EARFCN.
 - dl2ul and ul2dl convert between DL EARFCN and UL EARFCN corresponding to each other.
 - band returns information about band to which EARFCN belongs.
 
@@ -249,3 +250,31 @@ def frequency(earfcn): # -> freq (MHz)
         assert b.nul_lo <= earfcn <= b.nul_hi
         ful = b.ful_lo + 0.1*(earfcn - b.nul_lo)       # TS 36.101 5.7.3
         return ful
+
+# earfcn returns EARFCN that corresponds to frequency freq in MHz.
+#
+# By default the convertion is precise, but if nearby=True closest EARFCN is returned.
+#
+# band needs to be specified because different LTE bands can overlap in frequency domain - e.g. B37 and B33.
+# NOTE LTE bands do not overlap in EARFCN domain.
+def earfcn(freq: float, band: int, nearby=False): # -> EARFCN | ValueError
+    # TODO linear search -> bsearch
+    for b in _band_tab:
+        if b.band != band:
+            continue
+        if b.fdl_lo <= freq < b.fdl_hi_:
+            e = b.ndl_lo + 10*(freq - b.fdl_lo)        # TS 36.101 5.7.3
+            break
+        if b.ful_lo <= freq < b.ful_hi_:
+            e = b.nul_lo + 10*(freq - b.ful_lo)        # TS 36.101 5.7.3
+            break
+    else:
+        raise ValueError('B%d does not cover frequency=%r MHz' % (band, freq))
+
+    # check e is on raster
+    e_ = e
+    e = round(e)
+    if e != e_ and not nearby:
+        raise ValueError('B%d frequency=%r MHz is not on EARFCN raster' % (band, freq))
+
+    return e
